@@ -4,6 +4,36 @@ const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
 
+// ---- .env 자동 로더 ----
+// - .env 파일이 없으면 조용히 스킵 (Railway 등 프로덕션은 호스트가 env를 주입)
+// - 이미 설정된 환경변수는 절대 덮어쓰지 않음 (호스트/셸 주입값 우선)
+(function loadDotenv() {
+  try {
+    const fs = require('fs');
+    const envPath = path.join(__dirname, '..', '.env');
+    if (!fs.existsSync(envPath)) return;
+    const raw = fs.readFileSync(envPath, 'utf8');
+    for (const line of raw.split(/\r?\n/)) {
+      const s = line.trim();
+      if (!s || s.startsWith('#')) continue;
+      const eq = s.indexOf('=');
+      if (eq === -1) continue;
+      const key = s.slice(0, eq).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) continue; // 기존값 유지
+      let val = s.slice(eq + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1); // 감싼 따옴표 제거
+      }
+      process.env[key] = val;
+    }
+  } catch (_) {
+    // 로딩 실패는 조용히 무시 — env는 호스트에서 주입될 수 있음
+  }
+})();
+
 const storage = require('./storage');
 const { checkOnce, runtime, sendTestAlert } = require('./watcher');
 
