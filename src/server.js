@@ -241,7 +241,7 @@ app.get('/', (req, res) => {
   res.send(pageShell('새싹 레이더', `
     <div class="header">
       <div class="logo">🌱 새싹 레이더</div>
-      <a class="navlink" href="/settings">⚙️ 감시 조건 설정</a>
+      <a class="navlink" href="/settings">⚙️ 설정</a>
     </div>
 
     <div class="statusbar">
@@ -255,7 +255,7 @@ app.get('/', (req, res) => {
     </div>
     <div class="condbar">
       <span class="cond-text">${condSummary ? escapeHtml(condSummary) : '<span class="muted">조건 없음</span>'}</span>
-      <a class="cond-link" href="/settings">조건 변경 ›</a>
+      <a class="cond-link" href="/settings#conditions">조건 변경 ›</a>
     </div>
 
     ${sections}
@@ -372,7 +372,7 @@ app.get('/settings', requireAuth, (req, res) => {
     </div>
 
     <form id="settingsForm">
-      <div class="card">
+      <div class="card" id="conditions" style="scroll-margin-top:16px;">
         <div class="card-title">프로그램 유형</div>
         <div class="opts">
           ${cb('programType', '방문형', '방문형', has(s.programType, '방문형'))}
