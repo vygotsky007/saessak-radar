@@ -48,6 +48,26 @@ npm start
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 |
 | `TELEGRAM_CHAT_ID` | 알림 받을 채팅 ID |
 | `DATA_DIR` | 상태 저장 경로 (비우면 `./data`) |
+| `ADMIN_PASSWORD` | 설정/알림 보호용 관리자 비밀번호 (미설정 시 보호 없음) |
+
+> `.env` 파일은 서버 시작 시 자동 로드된다(이미 설정된 환경변수는 덮어쓰지 않음). 없으면 조용히 스킵.
+
+### 🔒 설정 비밀번호 보호 (`ADMIN_PASSWORD`)
+
+`ADMIN_PASSWORD` 를 설정하면 **감시 조건 설정과 알림 발송**이 비밀번호로 보호된다. 외부 라이브러리 없이 Node 내장 `crypto` 만 사용한다.
+
+- **보호 대상**: `GET /settings`, `POST /api/settings`, `POST /api/test-alert`, `POST /api/check-now`
+- **공개 유지**: 대시보드 `/`, `/health` (열람은 로그인 없이 가능)
+- **동작**: 비밀번호 입력(`/auth`)이 일치하면 HMAC 서명 쿠키(만료 30일, `HttpOnly`)를 발급하고, 서명 검증 미들웨어가 보호 라우트를 감싼다. 비밀번호 비교는 `crypto.timingSafeEqual` 사용. 비밀번호를 바꾸면 기존 쿠키는 자동 무효화된다.
+- **미설정 시**: 보호가 완전히 꺼져 지금처럼 로그인 없이 사용 (로컬 개발 편의).
+- 대시보드의 `⚙️ 감시 조건 설정` 버튼은 그대로 두되, 미인증 상태로 누르면 비밀번호 페이지를 경유한다.
+
+```bash
+# .env 예시
+ADMIN_PASSWORD=원하는비밀번호
+```
+
+Railway 등 배포 환경에서는 **Variables** 탭에 `ADMIN_PASSWORD` 를 추가한다.
 
 ---
 

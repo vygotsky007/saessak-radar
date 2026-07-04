@@ -3,6 +3,7 @@
 const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
+const crypto = require('crypto');
 
 // ---- .env 자동 로더 ----
 // - .env 파일이 없으면 조용히 스킵 (Railway 등 프로덕션은 호스트가 env를 주입)
@@ -50,6 +51,91 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// ============ 설정 비밀번호 보호 (HMAC 서명 쿠키, 외부 라이브러리 없이 crypto만) ============
+// ADMIN_PASSWORD 미설정 시 보호 없음(로컬 개발 편의).
+const AUTH_COOKIE = 'sr_auth';
+const AUTH_MAX_AGE_SEC = 30 * 24 * 60 * 60; // 30일
+
+function authEnabled() {
+  return !!process.env.ADMIN_PASSWORD;
+}
+
+// 서명 키: ADMIN_PASSWORD 로 HMAC → 비번을 바꾸면 기존 쿠키 자동 무효화
+function signPayload(payload) {
+  return crypto
+    .createHmac('sha256', process.env.ADMIN_PASSWORD || '')
+    .update(payload)
+    .digest('hex');
+}
+
+function makeToken() {
+  const payload = String(Date.now() + AUTH_MAX_AGE_SEC * 1000); // 만료 시각(ms)
+  return payload + '.' + signPayload(payload);
+}
+
+function verifyToken(tok) {
+  if (!tok || typeof tok !== 'string') return false;
+  const dot = tok.lastIndexOf('.');
+  if (dot < 0) return false;
+  const payload = tok.slice(0, dot);
+  const sig = tok.slice(dot + 1);
+  const expected = signPayload(payload);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  if (!crypto.timingSafeEqual(a, b)) return false; // 서명 검증 (timing-safe)
+  const exp = parseInt(payload, 10);
+  return Number.isFinite(exp) && exp > Date.now(); // 만료 확인
+}
+
+function passwordMatches(input) {
+  const pw = String(process.env.ADMIN_PASSWORD || '');
+  const a = Buffer.from(String(input == null ? '' : input));
+  const b = Buffer.from(pw);
+  if (a.length !== b.length) {
+    crypto.timingSafeEqual(b, b); // 길이 불일치도 상수시간 비교 후 실패
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b); // timingSafeEqual 로 비밀번호 비교
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const out = {};
+  header.split(';').forEach((part) => {
+    const i = part.indexOf('=');
+    if (i > -1) {
+      const k = part.slice(0, i).trim();
+      out[k] = decodeURIComponent(part.slice(i + 1).trim());
+    }
+  });
+  return out;
+}
+
+function isAuthed(req) {
+  return verifyToken(parseCookies(req)[AUTH_COOKIE]);
+}
+
+function cookieString(name, val, maxAgeSec) {
+  return `${name}=${encodeURIComponent(val)}; Max-Age=${maxAgeSec}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+// next 파라미터는 내부 경로만 허용 (오픈 리다이렉트 방지)
+function safeNext(n) {
+  if (typeof n === 'string' && n.startsWith('/') && !n.startsWith('//')) return n;
+  return '/settings';
+}
+
+// 보호 미들웨어: 미설정이면 통과, 미인증이면 페이지는 로그인으로 / API는 401
+function requireAuth(req, res, next) {
+  if (!authEnabled()) return next();
+  if (isAuthed(req)) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ ok: false, error: '인증이 필요합니다. 설정 페이지에서 로그인하세요.' });
+  }
+  return res.redirect('/auth?next=' + encodeURIComponent(req.originalUrl || '/settings'));
+}
 
 // ---- cron 스케줄 관리 ----
 let currentTask = null;
@@ -334,8 +420,8 @@ app.get('/', (req, res) => {
   `));
 });
 
-// ---- 페이지: 설정 ----
-app.get('/settings', (req, res) => {
+// ---- 페이지: 설정 (보호) ----
+app.get('/settings', requireAuth, (req, res) => {
   const s = storage.getSettings();
 
   const cb = (group, value, label, checked) => `
@@ -475,8 +561,44 @@ app.get('/settings', (req, res) => {
   `));
 });
 
+// ---- 페이지: 비밀번호 입력 (로그인) ----
+function authPage(next, failed) {
+  const nextVal = safeNext(next);
+  return pageShell('설정 로그인', `
+    <div class="header">
+      <div class="logo">🔒 설정 로그인</div>
+      <a class="navlink" href="/">← 대시보드</a>
+    </div>
+    <form method="POST" action="/auth" class="card" style="max-width:420px;">
+      <div class="card-title">관리자 비밀번호</div>
+      <div class="muted small" style="margin-bottom:12px;">감시 조건 설정과 알림 발송은 비밀번호로 보호됩니다.</div>
+      ${failed ? '<div class="err card" style="margin:0 0 12px;padding:10px 14px;">비밀번호가 올바르지 않습니다.</div>' : ''}
+      <input type="hidden" name="next" value="${escapeHtml(nextVal)}">
+      <input type="password" name="password" autofocus required
+        style="width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;font-size:15px;margin-bottom:12px;">
+      <button type="submit" class="btn btn-green btn-lg">로그인</button>
+    </form>
+  `);
+}
+
+app.get('/auth', (req, res) => {
+  if (!authEnabled()) return res.redirect('/settings');
+  if (isAuthed(req)) return res.redirect(safeNext(req.query.next));
+  res.send(authPage(req.query.next, false));
+});
+
+app.post('/auth', (req, res) => {
+  if (!authEnabled()) return res.redirect('/settings');
+  const body = req.body || {};
+  if (passwordMatches(body.password)) {
+    res.setHeader('Set-Cookie', cookieString(AUTH_COOKIE, makeToken(), AUTH_MAX_AGE_SEC));
+    return res.redirect(safeNext(body.next));
+  }
+  res.status(401).send(authPage(body.next, true));
+});
+
 // ---- API ----
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', requireAuth, (req, res) => {
   try {
     const saved = storage.saveSettings(req.body || {});
     rescheduleIfChanged();
@@ -486,7 +608,7 @@ app.post('/api/settings', (req, res) => {
   }
 });
 
-app.post('/api/check-now', async (req, res) => {
+app.post('/api/check-now', requireAuth, async (req, res) => {
   try {
     const result = await checkOnce({ reason: 'manual' });
     res.json(result);
@@ -495,7 +617,7 @@ app.post('/api/check-now', async (req, res) => {
   }
 });
 
-app.post('/api/test-alert', async (req, res) => {
+app.post('/api/test-alert', requireAuth, async (req, res) => {
   try {
     const result = await sendTestAlert();
     res.json(result);
