@@ -5,7 +5,7 @@ const cron = require('node-cron');
 const path = require('path');
 
 const storage = require('./storage');
-const { checkOnce, runtime } = require('./watcher');
+const { checkOnce, runtime, sendTestAlert } = require('./watcher');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,7 +51,10 @@ app.get('/', (req, res) => {
   const s = storage.getSettings();
   const log = storage.getLog();
   const today = new Date().toISOString().slice(0, 10);
-  const todayCount = log.filter((l) => (l.at || '').slice(0, 10) === today && l.sent).length;
+  // 테스트(리허설) 알림은 "오늘 보낸 알림" 카운트에서 제외
+  const todayCount = log.filter(
+    (l) => (l.at || '').slice(0, 10) === today && l.sent && l.kind !== 'test'
+  ).length;
 
   const chips = [];
   for (const v of s.programType) chips.push(v);
@@ -68,15 +71,22 @@ app.get('/', (req, res) => {
     .slice(0, 20)
     .map((l) => {
       const badge =
-        l.kind === 'start'
+        l.kind === 'test'
+          ? '<span class="badge badge-test">테스트</span>'
+          : l.kind === 'start'
           ? '<span class="badge badge-start">모집 시작</span>'
           : '<span class="badge badge-new">신규</span>';
       const time = fmtTime(l.at);
-      return `<div class="logrow">
-        ${badge}
+      const hasLink = !!l.link;
+      const gonow = hasLink ? '<span class="gonow">↗ 이동</span>' : '';
+      const inner = `${badge}
         <span class="logtitle">${escapeHtml(l.title || '')}</span>
         <span class="logtime">${escapeHtml(time)}</span>
-      </div>`;
+        ${gonow}`;
+      // 링크 있는 항목: 줄 전체를 새 탭 링크로. 링크 없는 항목(테스트 등)은 클릭 비활성.
+      return hasLink
+        ? `<a class="logrow logrow-link" href="${escapeHtml(l.link)}" target="_blank" rel="noopener">${inner}</a>`
+        : `<div class="logrow logrow-disabled">${inner}</div>`;
     })
     .join('');
 
@@ -129,6 +139,15 @@ app.get('/', (req, res) => {
       <div class="loglist">${logRows || '<div class="muted">아직 감지된 항목이 없습니다.</div>'}</div>
     </div>
 
+    <div class="card">
+      <div class="card-title">🔔 알림 리허설</div>
+      <div class="muted small" style="margin-bottom:12px;">
+        실제 알림 경로(브라우저 알림 + 텔레그램)를 그대로 사용해 테스트 알림 1건을 발송합니다.
+        조건 일치 수·오늘 보낸 알림 카운트·감시 스냅샷(state)에는 반영되지 않습니다.
+      </div>
+      <button id="testBtn" class="btn btn-green">테스트 알림 보내기</button>
+    </div>
+
     ${runtime.lastError ? `<div class="card err">마지막 오류: ${escapeHtml(runtime.lastError)}</div>` : ''}
 
     <script>
@@ -155,6 +174,81 @@ app.get('/', (req, res) => {
           btn.textContent = '지금 즉시 확인';
         }
       });
+
+      // ---- 브라우저 알림: 클릭 시 상세페이지 새 탭 열기 ----
+      function showBrowserNotification(opts) {
+        if (!('Notification' in window)) return false;
+        var fire = function () {
+          try {
+            var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
+            n.onclick = function (e) {
+              e.preventDefault();
+              if (opts.link) window.open(opts.link, '_blank', 'noopener');
+              window.focus();
+              n.close();
+            };
+            return true;
+          } catch (_) { return false; }
+        };
+        if (Notification.permission === 'granted') return fire();
+        if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(function (p) { if (p === 'granted') fire(); });
+          return true; // 권한 요청을 띄웠으므로 채널은 활성으로 간주
+        }
+        return false; // 사용자가 차단함
+      }
+
+      // ---- 토스트 ----
+      function toast(msg) {
+        var t = document.getElementById('toast');
+        if (!t) {
+          t = document.createElement('div');
+          t.id = 'toast';
+          t.className = 'toast';
+          document.body.appendChild(t);
+        }
+        t.textContent = msg;
+        t.classList.add('show');
+        clearTimeout(t._timer);
+        t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
+      }
+
+      // ---- 알림 리허설 버튼 ----
+      var testBtn = document.getElementById('testBtn');
+      if (testBtn) {
+        testBtn.addEventListener('click', async function () {
+          testBtn.disabled = true;
+          var orig = testBtn.textContent;
+          testBtn.textContent = '발송 중…';
+          try {
+            var r = await fetch('/api/test-alert', { method: 'POST' });
+            var d = await r.json();
+            if (d.ok) {
+              var c = d.card || {};
+              var meta = [c.type, (c.regions || []).join(','), (c.levels || []).join(',')]
+                .filter(Boolean).join(' · ');
+              var browserOk = showBrowserNotification({
+                title: '🔴 [모집 시작] ' + (c.title || ''),
+                body: meta,
+                link: c.link,
+              });
+              var tgText = d.telegram === 'sent' ? '텔레그램 O'
+                : d.telegram === 'failed' ? '텔레그램 X(실패)'
+                : '텔레그램 미설정';
+              toast('발송됨: 브라우저 ' + (browserOk ? 'O' : 'X') + ' / ' + tgText);
+              setTimeout(function () { location.reload(); }, 1700);
+            } else {
+              toast('발송 실패: ' + (d.error || '알 수 없음'));
+              testBtn.disabled = false;
+              testBtn.textContent = orig;
+            }
+          } catch (e) {
+            toast('요청 오류: ' + e.message);
+            testBtn.disabled = false;
+            testBtn.textContent = orig;
+          }
+        });
+      }
     </script>
   `));
 });
@@ -296,6 +390,15 @@ app.post('/api/check-now', async (req, res) => {
   }
 });
 
+app.post('/api/test-alert', async (req, res) => {
+  try {
+    const result = await sendTestAlert();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => res.send('ok'));
 
 // ---- helpers ----
@@ -349,13 +452,26 @@ function pageShell(title, body) {
     padding:5px 11px; border-radius:999px; font-size:13px; font-weight:600; }
   .row-between { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
   .loglist { margin-top:6px; }
-  .logrow { display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--line); }
+  .logrow { display:flex; align-items:center; gap:10px; padding:9px 10px; margin:0 -10px;
+    border-top:1px solid var(--line); border-radius:9px; }
   .logrow:first-child { border-top:none; }
+  .logrow-link { text-decoration:none; color:inherit; transition:background .12s; }
+  .logrow-link:hover { background:#eef7f1; }
+  .logrow-disabled { cursor:default; opacity:.62; }
   .logtitle { flex:1; font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .logtime { color:var(--muted); font-size:12px; white-space:nowrap; }
+  .gonow { color:var(--green-d); font-size:12px; font-weight:700; white-space:nowrap;
+    opacity:0; transition:opacity .12s; }
+  .logrow-link:hover .gonow { opacity:1; }
   .badge { font-size:11px; font-weight:700; padding:3px 8px; border-radius:7px; white-space:nowrap; }
   .badge-start { background:#fdeaea; color:#d9534f; }
   .badge-new { background:#fff6e6; color:#c98a00; }
+  .badge-test { background:#f0e9fb; color:#7c3aed; }
+  .toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(20px);
+    background:#1c2a22; color:#fff; padding:12px 18px; border-radius:12px; font-size:14px; font-weight:600;
+    box-shadow:0 8px 24px rgba(0,0,0,.18); opacity:0; pointer-events:none; transition:.25s; z-index:50;
+    max-width:90vw; text-align:center; }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   .btn { border:none; border-radius:10px; padding:10px 16px; font-size:14px; font-weight:700;
     cursor:pointer; }
   .btn-green { background:var(--green); color:#fff; }

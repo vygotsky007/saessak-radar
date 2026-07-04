@@ -61,8 +61,14 @@ function matchesSettings(card, settings) {
   return true;
 }
 
+function isTelegramConfigured() {
+  return !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
+}
+
 // ---- 텔레그램 발송 ----
-async function sendTelegram(html) {
+// opts.link 이 있으면 본문 링크는 그대로 두고, 인라인 키보드 버튼("🔗 신청 페이지 열기")을 함께 붙인다.
+async function sendTelegram(html, opts = {}) {
+  const { link } = opts;
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
@@ -71,17 +77,24 @@ async function sendTelegram(html) {
     return false;
   }
   try {
+    const payload = {
+      chat_id: chatId,
+      text: html,
+      parse_mode: 'HTML',
+      disable_web_page_preview: false,
+    };
+    if (link) {
+      // 버튼 미지원 클라이언트 대비: 본문 링크는 buildMessage 에 그대로 유지된다.
+      payload.reply_markup = {
+        inline_keyboard: [[{ text: '🔗 신청 페이지 열기', url: link }]],
+      };
+    }
     const res = await fetch(
       `https://api.telegram.org/bot${token}/sendMessage`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: html,
-          parse_mode: 'HTML',
-          disable_web_page_preview: false,
-        }),
+        body: JSON.stringify(payload),
       }
     );
     const data = await res.json();
@@ -171,7 +184,7 @@ async function checkOnce({ reason } = {}) {
   // 알림 발송 + 로그 기록
   for (const n of notifications) {
     const html = buildMessage(n.kind, n.card);
-    const sent = await sendTelegram(html);
+    const sent = await sendTelegram(html, { link: n.card.link });
     const logEntry = {
       at: now,
       kind: n.kind, // 'start' | 'new'
@@ -207,4 +220,46 @@ async function checkOnce({ reason } = {}) {
   };
 }
 
-module.exports = { checkOnce, matchesSettings, runtime, sendTelegram };
+// ---- 알림 리허설 (테스트 알림) ----
+// 가짜 프로그램 1건을 실제 발송 함수(buildMessage + sendTelegram)에 그대로 태운다.
+// - 텔레그램 설정 시 인라인 버튼까지 실제와 동일하게 발송
+// - 로그에는 kind:'test' 로 기록 (대시보드에서 "오늘 보낸 알림" 카운트·조건 일치 수에서 제외)
+// - state.json(감시 스냅샷)에는 절대 반영하지 않는다 → 실제 전환 감지에 영향 없음
+async function sendTestAlert() {
+  const card = {
+    id: 'test',
+    title: '[테스트] 새싹 레이더 알림 점검',
+    status: '모집 중',
+    type: '방문형',
+    regions: ['서울·인천권'],
+    levels: ['초등학교'],
+    tags: ['일반형'], // buildMessage 가 '#' 를 붙여 #일반형 으로 렌더
+    link: 'https://newsac.kosac.re.kr/',
+  };
+
+  const tgConfigured = isTelegramConfigured();
+  const html = buildMessage('start', card);
+  const sent = await sendTelegram(html, { link: card.link });
+  const telegram = !tgConfigured ? 'unset' : sent ? 'sent' : 'failed';
+
+  storage.appendLog({
+    at: new Date().toISOString(),
+    kind: 'test',
+    title: card.title,
+    status: card.status,
+    link: card.link,
+    sent,
+  });
+  console.log(`[watcher] 테스트 알림 발송 telegram=${telegram}`);
+
+  return { ok: true, telegram, card };
+}
+
+module.exports = {
+  checkOnce,
+  matchesSettings,
+  runtime,
+  sendTelegram,
+  sendTestAlert,
+  isTelegramConfigured,
+};
