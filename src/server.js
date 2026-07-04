@@ -190,20 +190,23 @@ app.get('/', (req, res) => {
     .map((c) => `<span class="chip">${escapeHtml(c)}</span>`)
     .join('');
 
+  const badgeMap = {
+    test: '<span class="badge badge-test">테스트</span>',
+    start: '<span class="badge badge-start">모집 시작</span>',
+    new: '<span class="badge badge-new">신규</span>',
+    reminder: '<span class="badge badge-reminder">리마인더</span>',
+    change: '<span class="badge badge-change">정보 변경</span>',
+  };
   const logRows = log
     .slice(0, 20)
     .map((l) => {
-      const badge =
-        l.kind === 'test'
-          ? '<span class="badge badge-test">테스트</span>'
-          : l.kind === 'start'
-          ? '<span class="badge badge-start">모집 시작</span>'
-          : '<span class="badge badge-new">신규</span>';
-      const time = fmtTime(l.at);
+      const badge = badgeMap[l.kind] || badgeMap.new;
+      const time = relativeTime(l.at, Date.now());
       const hasLink = !!l.link;
       const gonow = hasLink ? '<span class="gonow">↗ 이동</span>' : '';
+      // 로그 줄에서는 [운영기관] 프로그램명을 말줄임 처리 (logtitle 에서 ellipsis)
       const inner = `${badge}
-        <span class="logtitle">${escapeHtml(l.title || '')}</span>
+        <span class="logtitle">${escapeHtml(instLabel(l.institution, l.title))}</span>
         <span class="logtime">${escapeHtml(time)}</span>
         ${gonow}`;
       // 링크 있는 항목: 줄 전체를 새 탭 링크로. 링크 없는 항목(테스트 등)은 클릭 비활성.
@@ -213,15 +216,27 @@ app.get('/', (req, res) => {
     })
     .join('');
 
-  const lastCheck = runtime.lastCheckAt ? fmtTime(runtime.lastCheckAt) : '아직 없음';
+  const nowMs = Date.now();
+  const rel = relativeTime(runtime.lastCheckAt, nowMs);
   const okText =
-    runtime.lastCheckOk === null
-      ? '대기 중'
-      : runtime.lastCheckOk
-      ? '정상'
-      : '실패';
-  const okClass =
-    runtime.lastCheckOk === false ? 'stat-bad' : 'stat-ok';
+    runtime.lastCheckOk === null ? '대기 중' : runtime.lastCheckOk ? '감시 정상' : '수집 실패';
+  const dotClass =
+    runtime.lastCheckOk === false ? 'dot-bad' : runtime.lastCheckOk === null ? 'dot-wait' : 'dot-ok';
+  const condSummary = conditionSummary(s);
+  const planner = renderPlanner();
+
+  // 섹션 자동 우선순위: 오픈일시 확인된 예정 프로그램이 1개 이상이면 플래너를 위로
+  const recentSection = `
+    <div class="card">
+      <div class="row-between">
+        <div class="card-title">최근 감지</div>
+        <button id="checkBtn" class="btn btn-green btn-sm">지금 즉시 확인</button>
+      </div>
+      <div id="checkResult" class="muted small"></div>
+      <div class="loglist">${logRows || '<div class="muted small">아직 감지된 항목이 없습니다.</div>'}</div>
+    </div>`;
+  const sections =
+    planner.openReady >= 1 ? planner.html + recentSection : recentSection + planner.html;
 
   res.send(pageShell('새싹 레이더', `
     <div class="header">
@@ -229,52 +244,21 @@ app.get('/', (req, res) => {
       <a class="navlink" href="/settings">⚙️ 감시 조건 설정</a>
     </div>
 
-    ${renderPlanner()}
-
-    <div class="grid">
-      <div class="card stat">
-        <div class="stat-label">감시 상태</div>
-        <div class="stat-num ${okClass}">${okText}</div>
-        <div class="stat-sub">마지막 확인: ${escapeHtml(lastCheck)}</div>
-        <div class="stat-sub">간격: ${currentInterval || s.intervalMinutes}분</div>
-      </div>
-      <div class="card stat">
-        <div class="stat-label">조건 일치 프로그램</div>
-        <div class="stat-num">${runtime.lastMatchCount}</div>
-        <div class="stat-sub">전체 수집: ${runtime.totalCards}건</div>
-      </div>
-      <div class="card stat">
-        <div class="stat-label">오늘 보낸 알림</div>
-        <div class="stat-num">${todayCount}</div>
-        <div class="stat-sub">누적 로그: ${log.length}건</div>
-      </div>
+    <div class="statusbar">
+      <span class="sdot ${dotClass}"></span>
+      <span class="sb-main">${escapeHtml(okText)}</span>
+      <span class="sb-sep">·</span><span>${escapeHtml(rel)} 확인</span>
+      <span class="sb-sep">·</span><span>${currentInterval || s.intervalMinutes}분 간격</span>
+      <span class="sb-sep">·</span><span>일치 ${runtime.lastMatchCount}건</span>
+      <span class="sb-sep">·</span><span>오늘 알림 ${todayCount}건</span>
+      <span class="sb-sep">·</span><span id="permInline" class="sb-perm"></span>
+    </div>
+    <div class="condbar">
+      <span class="cond-text">${condSummary ? escapeHtml(condSummary) : '<span class="muted">조건 없음</span>'}</span>
+      <a class="cond-link" href="/settings">조건 변경 ›</a>
     </div>
 
-    <!-- 브라우저 알림 권한 배너 (내용은 클라이언트 permission 상태 기준으로 렌더) -->
-    <div id="permBanner"></div>
-
-    <div class="card">
-      <div class="card-title">현재 감시 조건</div>
-      <div class="chips">${chipsHtml || '<span class="muted">설정 없음</span>'}</div>
-    </div>
-
-    <div class="card">
-      <div class="row-between">
-        <div class="card-title">최근 감지 로그 (20건)</div>
-        <button id="checkBtn" class="btn btn-green">지금 즉시 확인</button>
-      </div>
-      <div id="checkResult" class="muted small"></div>
-      <div class="loglist">${logRows || '<div class="muted">아직 감지된 항목이 없습니다.</div>'}</div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">🔔 알림 리허설</div>
-      <div class="muted small" style="margin-bottom:12px;">
-        실제 알림 경로(브라우저 알림 + 텔레그램)를 그대로 사용해 테스트 알림 1건을 발송합니다.
-        조건 일치 수·오늘 보낸 알림 카운트·감시 스냅샷(state)에는 반영되지 않습니다.
-      </div>
-      <button id="testBtn" class="btn btn-green">테스트 알림 보내기</button>
-    </div>
+    ${sections}
 
     ${runtime.lastError ? `<div class="card err">마지막 오류: ${escapeHtml(runtime.lastError)}</div>` : ''}
 
@@ -336,38 +320,24 @@ app.get('/', (req, res) => {
         t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
       }
 
-      // ---- 브라우저 알림 권한 배너 ----
-      // permission 상태(granted/default/denied)에 따라 배너를 그린다.
-      // requestPermission 은 "브라우저 알림 켜기" 버튼 클릭(사용자 제스처)에서만 호출.
-      function renderPermBanner() {
-        var el = document.getElementById('permBanner');
+      // ---- 브라우저 알림 권한(상태바 인라인) ----
+      // permission 상태에 따라 상태바에 표시. requestPermission 은 "알림 켜기" 버튼 클릭에서만.
+      function renderPermInline() {
+        var el = document.getElementById('permInline');
         if (!el) return;
-        if (!('Notification' in window)) {
-          el.innerHTML = '<div class="permbanner perm-denied"><span class="permtext">이 브라우저는 알림을 지원하지 않습니다.</span></div>';
-          return;
-        }
+        if (!('Notification' in window)) { el.innerHTML = '<span class="perm-bad">알림 미지원</span>'; return; }
         var perm = Notification.permission;
-        if (perm === 'granted') {
-          el.innerHTML = '<span class="permchip">🔔 브라우저 알림 켜짐</span>';
-          return;
-        }
+        if (perm === 'granted') { el.innerHTML = '<span class="perm-ok">🔔 브라우저 알림 켜짐</span>'; return; }
         if (perm === 'denied') {
-          el.innerHTML = '<div class="permbanner perm-denied">' +
-            '<span class="permtext">🔕 알림이 차단됨 — 주소창 자물쇠 → 알림 → 허용으로 변경 후 새로고침</span>' +
-            '</div>';
+          el.innerHTML = '<span class="perm-bad" title="주소창 자물쇠 → 알림 → 허용으로 변경 후 새로고침">🔕 알림 차단됨 (자물쇠→알림→허용)</span>';
           return;
         }
-        // default
-        el.innerHTML = '<div class="permbanner perm-default">' +
-          '<span class="permtext">🔔 브라우저 알림이 꺼져 있어요</span>' +
-          '<button id="permBtn" class="btn btn-amber">브라우저 알림 켜기</button>' +
-          '</div>';
+        el.innerHTML = '<button id="permBtn" class="btn btn-amber btn-xs">🔔 알림 켜기</button>';
         var pb = document.getElementById('permBtn');
         if (pb) {
           pb.addEventListener('click', function () {
-            // 사용자 제스처 안에서만 권한 요청 → 크롬이 프롬프트를 띄운다
             Notification.requestPermission().then(function (p) {
-              renderPermBanner();
+              renderPermInline();
               if (p === 'granted') {
                 showBrowserNotification({ title: '🌱 새싹 레이더', body: '새싹 레이더 알림이 켜졌습니다' });
                 toast('브라우저 알림이 켜졌습니다');
@@ -378,44 +348,7 @@ app.get('/', (req, res) => {
           });
         }
       }
-      renderPermBanner();
-
-      // ---- 알림 리허설 버튼 ----
-      var testBtn = document.getElementById('testBtn');
-      if (testBtn) {
-        testBtn.addEventListener('click', async function () {
-          testBtn.disabled = true;
-          var orig = testBtn.textContent;
-          testBtn.textContent = '발송 중…';
-          try {
-            var r = await fetch('/api/test-alert', { method: 'POST' });
-            var d = await r.json();
-            if (d.ok) {
-              var c = d.card || {};
-              var meta = [c.type, (c.regions || []).join(','), (c.levels || []).join(',')]
-                .filter(Boolean).join(' · ');
-              var browserOk = showBrowserNotification({
-                title: '🔴 [모집 시작] ' + (c.title || ''),
-                body: meta,
-                link: c.link,
-              });
-              var tgText = d.telegram === 'sent' ? '텔레그램 O'
-                : d.telegram === 'failed' ? '텔레그램 X(실패)'
-                : '텔레그램 미설정';
-              toast('발송됨: 브라우저 ' + (browserOk ? 'O' : 'X') + ' / ' + tgText);
-              setTimeout(function () { location.reload(); }, 1700);
-            } else {
-              toast('발송 실패: ' + (d.error || '알 수 없음'));
-              testBtn.disabled = false;
-              testBtn.textContent = orig;
-            }
-          } catch (e) {
-            toast('요청 오류: ' + e.message);
-            testBtn.disabled = false;
-            testBtn.textContent = orig;
-          }
-        });
-      }
+      renderPermInline();
     </script>
   `));
 });
@@ -520,9 +453,79 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
     </form>
 
+    <div class="card">
+      <div class="card-title">🔔 알림 리허설</div>
+      <div class="muted small" style="margin-bottom:12px;">
+        실제 알림 경로(브라우저 알림 + 텔레그램)를 그대로 사용해 테스트 알림 1건을 발송합니다.
+        조건 일치 수·오늘 보낸 알림 카운트·감시 스냅샷(state)에는 반영되지 않습니다.
+      </div>
+      <button id="testBtn" class="btn btn-green">테스트 알림 보내기</button>
+    </div>
+
     <script>
       const form = document.getElementById('settingsForm');
       const msg = document.getElementById('saveMsg');
+
+      // ---- 공용: 브라우저 알림 + 토스트 ----
+      function showBrowserNotification(opts) {
+        if (!('Notification' in window)) return false;
+        if (Notification.permission !== 'granted') return false;
+        try {
+          var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
+          n.onclick = function (e) {
+            e.preventDefault();
+            if (opts.link) window.open(opts.link, '_blank', 'noopener');
+            window.focus();
+            n.close();
+          };
+          return true;
+        } catch (_) { return false; }
+      }
+      function toast(m) {
+        var t = document.getElementById('toast');
+        if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; document.body.appendChild(t); }
+        t.textContent = m;
+        t.classList.add('show');
+        clearTimeout(t._timer);
+        t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
+      }
+
+      // ---- 알림 리허설 버튼 ----
+      var testBtn = document.getElementById('testBtn');
+      if (testBtn) {
+        testBtn.addEventListener('click', async function () {
+          testBtn.disabled = true;
+          var orig = testBtn.textContent;
+          testBtn.textContent = '발송 중…';
+          try {
+            var r = await fetch('/api/test-alert', { method: 'POST' });
+            var d = await r.json();
+            if (d.ok) {
+              var c = d.card || {};
+              var meta = [c.type, (c.regions || []).join(','), (c.levels || []).join(',')]
+                .filter(Boolean).join(' · ');
+              var label = (c.institution ? '[' + c.institution + '] ' : '') + (c.title || '');
+              var browserOk = showBrowserNotification({
+                title: '🔴 [모집 시작] ' + label,
+                body: meta,
+                link: c.link,
+              });
+              var tgText = d.telegram === 'sent' ? '텔레그램 O'
+                : d.telegram === 'failed' ? '텔레그램 X(실패)'
+                : '텔레그램 미설정';
+              toast('발송됨: 브라우저 ' + (browserOk ? 'O' : 'X') + ' / ' + tgText);
+            } else {
+              toast('발송 실패: ' + (d.error || '알 수 없음'));
+            }
+          } catch (e) {
+            toast('요청 오류: ' + e.message);
+          } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = orig;
+          }
+        });
+      }
+
       // 체크 시각적 토글
       form.addEventListener('change', (e) => {
         if (e.target.type === 'checkbox') {
@@ -646,7 +649,47 @@ function fmtTime(iso) {
   }
 }
 
-// ---- 신청 플래너 (대시보드 최상단 카드) ----
+// "[운영기관] 프로그램명" (기관명 없으면 프로그램명만)
+function instLabel(institution, title) {
+  const inst = String(institution || '').trim();
+  const t = String(title || '');
+  return inst ? `[${inst}] ${t}` : t;
+}
+
+// 상대시각 "N분 전" (초 단위 제거)
+function relativeTime(iso, nowMs) {
+  if (!iso) return '확인 전';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '확인 전';
+  const diff = Math.max(0, nowMs - t);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return '방금 전';
+  if (min < 60) return `${min}분 전`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}시간 전`;
+  return `${Math.floor(hr / 24)}일 전`;
+}
+
+// 조건 요약 한 줄: "방문형 · 초등 · 서울·인천권 · 예정+중 · #일반형 #다문화"
+function conditionSummary(s) {
+  const LV = { 초등학교: '초등', 중학교: '중등', 고등학교: '고등' };
+  const ST = { '모집 예정': '예정', '모집 중': '중' };
+  const TG = {
+    일반형: '일반형',
+    '사회적 배려형(다문화)': '다문화',
+    '사회적 배려형(도서벽지)': '도서벽지',
+    '사회적 배려형(특수교육)': '특수교육',
+  };
+  const parts = [];
+  if (s.programType.length) parts.push(s.programType.join('·'));
+  if (s.schoolLevels.length) parts.push(s.schoolLevels.map((v) => LV[v] || v).join('·'));
+  if (s.regions.length) parts.push(s.regions.join('·'));
+  if (s.statuses.length) parts.push(s.statuses.map((v) => ST[v] || v).join('+'));
+  if (s.targets.length) parts.push(s.targets.map((v) => '#' + (TG[v] || v)).join(' '));
+  return parts.join(' · ');
+}
+
+// ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
 function renderPlanner() {
   const state = storage.getState();
   const details = storage.getDetails();
@@ -662,6 +705,7 @@ function renderPlanner() {
 
   const open = cur.filter((x) => x.status === '모집 예정');
   const live = cur.filter((x) => x.status === '모집 중');
+  const openReady = open.filter((x) => x.detail && x.detail.applyStartAt).length;
 
   // 그룹 A: 신청 시작 오름차순, 일시 미확인은 맨 아래
   open.sort((a, b) => {
@@ -701,8 +745,8 @@ function renderPlanner() {
       const meta = [chapters, targets, tags].filter(Boolean).join(' · ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
-          <div class="plan-title">${escapeHtml(x.title || '')}</div>
           <div class="plan-open">${whenHtml}</div>
+          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
           ${meta ? `<div class="plan-meta">${escapeHtml(meta)}</div>` : ''}
         </div>
         <span class="plan-go">상세 ↗</span>
@@ -724,7 +768,7 @@ function renderPlanner() {
       const tags = (x.tags || []).map((t) => '#' + t).join(' ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
-          <div class="plan-title">${escapeHtml(x.title || '')} ${remBadge}</div>
+          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))} ${remBadge}</div>
           <div class="gauge"><div class="gauge-fill ${rem <= 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>
           <div class="plan-meta">승인 ${app}/${cap}학급${end ? ' · 마감 ' + escapeHtml(end) : ''}${
         tags ? ' · ' + escapeHtml(tags) : ''
@@ -740,14 +784,14 @@ function renderPlanner() {
     .map(
       (l) => `<div class="planrow planrow-static">
         <div class="plan-main">
-          <div class="plan-title"><span class="badge badge-change">정보 변경</span> ${escapeHtml(l.title || '')}</div>
+          <div class="plan-title"><span class="badge badge-change">정보 변경</span> ${escapeHtml(instLabel(l.institution, l.title))}</div>
           <div class="plan-meta">${escapeHtml(l.changes || '')}</div>
         </div>
       </div>`
     )
     .join('');
 
-  return `
+  const html = `
     <div class="card planner">
       <div class="card-title">🗂️ 신청 플래너</div>
       <div class="plan-group">
@@ -767,6 +811,7 @@ function renderPlanner() {
           : ''
       }
     </div>`;
+  return { html, openReady };
 }
 
 function pageShell(title, body) {
@@ -789,8 +834,26 @@ function pageShell(title, body) {
     background:#fff; padding:8px 12px; border-radius:10px; border:1px solid var(--line); }
   .navlink:hover { background:#f0f7f2; }
   .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:14px; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:14px; }
-  .card-title { font-weight:700; font-size:15px; margin-bottom:10px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; }
+  .card-title { font-weight:700; font-size:15px; margin-bottom:9px; }
+  /* v3 상태바 */
+  .statusbar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; background:#fff;
+    border:1px solid var(--line); border-radius:12px; padding:10px 14px; margin-bottom:8px;
+    font-size:13px; color:#405046; }
+  .sdot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .dot-ok { background:var(--green); box-shadow:0 0 0 3px #d9f0e2; }
+  .dot-bad { background:#d9534f; box-shadow:0 0 0 3px #f7d9d8; }
+  .dot-wait { background:#c9a227; box-shadow:0 0 0 3px #f5ecc9; }
+  .sb-main { font-weight:800; color:var(--ink); }
+  .sb-sep { color:#cdd6d0; }
+  .sb-perm { display:inline-flex; align-items:center; }
+  .perm-ok { color:var(--green-d); font-weight:700; }
+  .perm-bad { color:#d9534f; font-weight:700; cursor:help; }
+  .condbar { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+    padding:2px 4px 0; margin-bottom:14px; font-size:13px; color:#5a6a60; }
+  .cond-text { font-weight:600; }
+  .cond-link { color:var(--green-d); text-decoration:none; font-weight:700; white-space:nowrap; }
+  .cond-link:hover { text-decoration:underline; }
   .stat { text-align:left; }
   .stat-label { color:var(--muted); font-size:12px; font-weight:600; }
   .stat-num { font-size:30px; font-weight:800; margin:2px 0 4px; letter-spacing:-0.02em; }
@@ -826,9 +889,9 @@ function pageShell(title, body) {
   .planrow:hover { background:#eef7f1; }
   .planrow-static, .planrow-static:hover { background:transparent; cursor:default; }
   .plan-main { flex:1; min-width:0; }
-  .plan-title { font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .plan-title { font-size:13px; font-weight:700; margin-top:2px; word-break:break-word; }
   .plan-open { margin-top:3px; display:flex; align-items:center; gap:8px; }
-  .plan-when { font-size:16px; font-weight:800; letter-spacing:-0.01em; color:var(--ink); }
+  .plan-when { font-size:15px; font-weight:800; letter-spacing:-0.01em; color:var(--ink); }
   .plan-meta { margin-top:3px; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .plan-go { color:var(--green-d); font-size:12px; font-weight:700; white-space:nowrap; opacity:.35; transition:opacity .12s; }
   .planrow:hover .plan-go { opacity:1; }
@@ -863,6 +926,9 @@ function pageShell(title, body) {
   .btn-green:hover { background:var(--green-d); }
   .btn-green:disabled { opacity:.6; cursor:default; }
   .btn-lg { padding:12px 26px; font-size:15px; }
+  .btn-sm { padding:7px 12px; font-size:13px; }
+  .btn-xs { padding:3px 10px; font-size:12px; border-radius:8px; }
+  .badge-reminder { background:#eaf1ff; color:#2a52be; }
   .opts { display:flex; flex-wrap:wrap; gap:9px; }
   .opt { display:inline-flex; align-items:center; gap:7px; background:#f4f8f5; border:1px solid var(--line);
     padding:9px 13px; border-radius:11px; cursor:pointer; font-size:14px; user-select:none; }

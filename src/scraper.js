@@ -56,6 +56,7 @@ function mapDetail(programId, b) {
   return {
     id: 'p_' + programId,
     programId,
+    institution: (b.institution && b.institution.institutionName) || b.institutionName || '',
     status: STATUS_MAP[b.operationStatusCode] || '',
     applyStartAt: buildAt(b.applyStartDate, b.applyStartHH, b.applyStartmm),
     applyEndAt: buildAt(b.applyEndDate, b.applyEndHH, b.applyEndmm),

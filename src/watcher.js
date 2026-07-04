@@ -77,6 +77,13 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
+// "[운영기관] 프로그램명" 라벨 (기관명 없으면 프로그램명만)
+function withInst(institution, title) {
+  const inst = String(institution || '').trim();
+  const t = String(title || '');
+  return inst ? `[${inst}] ${t}` : t;
+}
+
 // ---- 감시 조건 판정 ----
 function matchesSettings(card, settings) {
   // 모집 완료는 항상 제외
@@ -176,7 +183,7 @@ function buildMessage(kind, card) {
 
   return (
     `${head}\n` +
-    `<b>${escapeHtml(card.title)}</b>\n` +
+    `<b>${escapeHtml(withInst(card.institution, card.title))}</b>\n` +
     `${escapeHtml(metaParts.join(' · '))}\n` +
     `${escapeHtml(card.link)}`
   );
@@ -251,6 +258,7 @@ async function checkOnce({ reason } = {}) {
       at: now,
       kind: n.kind, // 'start' | 'new'
       title: n.card.title,
+      institution: n.card.institution || '',
       status: n.card.status,
       link: n.card.link,
       sent,
@@ -292,6 +300,7 @@ async function checkOnce({ reason } = {}) {
         if (changes.length) {
           changeCount += 1;
           const title = (state[id] && state[id].title) || newD.id;
+          const institution = (state[id] && state[id].institution) || newD.institution || '';
           const link = (state[id] && state[id].link) || '';
           const desc = changes
             .map((c) => `${c.field} ${c.from || '-'}→${c.to || '-'}`)
@@ -300,17 +309,18 @@ async function checkOnce({ reason } = {}) {
             at: now,
             kind: 'change',
             title,
+            institution,
             status: newD.status,
             link,
             sent: false,
             changes: desc,
           });
-          console.log(`[watcher] 정보 변경: ${title} — ${desc}`);
+          console.log(`[watcher] 정보 변경: ${withInst(institution, title)} — ${desc}`);
           // 신청 시작 일시 변경 → 텔레그램 알림 + 리마인더 재예약
           if ((oldD.applyStartAt || '') !== (newD.applyStartAt || '')) {
             const html =
               `📅 <b>[신청일정 변경]</b>\n` +
-              `<b>${escapeHtml(title)}</b>\n` +
+              `<b>${escapeHtml(withInst(institution, title))}</b>\n` +
               `신청 시작: ${escapeHtml(fmtKstDateTime(oldD.applyStartAt) || '미공지')} → ` +
               `<b>${escapeHtml(fmtKstDateTime(newD.applyStartAt) || '미공지')}</b>\n` +
               `${escapeHtml(link)}`;
@@ -338,6 +348,7 @@ async function checkOnce({ reason } = {}) {
     const prev = nextState[card.id];
     nextState[card.id] = {
       title: card.title,
+      institution: card.institution || '',
       status: card.status,
       link: card.link,
       type: card.type,
@@ -462,6 +473,8 @@ async function checkReminders() {
 
 async function sendReminder(kind, id, d, st) {
   const title = (st && st.title) || d.id;
+  const institution = (st && st.institution) || d.institution || '';
+  const label = withInst(institution, title);
   const link =
     (st && st.link) ||
     (d.programId ? `${ORIGIN}/public/program/thumb/${d.programId}` : ORIGIN);
@@ -471,17 +484,18 @@ async function sendReminder(kind, id, d, st) {
     kind === 'pre_10min'
       ? `10분 뒤 <b>${escapeHtml(when)}</b> 신청이 열립니다.`
       : `내일 <b>${escapeHtml(when)}</b> 신청이 열립니다.`;
-  const html = `${head}\n<b>${escapeHtml(title)}</b>\n${line}\n${escapeHtml(link)}`;
+  const html = `${head}\n<b>${escapeHtml(label)}</b>\n${line}\n${escapeHtml(link)}`;
   const ok = await sendTelegram(html, { link });
   storage.appendLog({
     at: new Date().toISOString(),
     kind: 'reminder',
     title: `${kind === 'pre_10min' ? '[10분전]' : '[전날]'} ${title}`,
+    institution,
     status: '모집 예정',
     link,
     sent: ok,
   });
-  console.log(`[watcher] 리마인더(${kind}): ${title} sent=${ok}`);
+  console.log(`[watcher] 리마인더(${kind}): ${label} sent=${ok}`);
   return ok;
 }
 
