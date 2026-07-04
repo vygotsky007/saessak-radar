@@ -1,0 +1,18 @@
+{
+  "name": "saessak-radar",
+  "version": "1.0.0",
+  "description": "디지털새싹 모집 감시 + 텔레그램 알림",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "playwright": "1.49.0"
+  }
+}
