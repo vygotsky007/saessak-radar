@@ -155,6 +155,9 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 브라우저 알림 권한 배너 (내용은 클라이언트 permission 상태 기준으로 렌더) -->
+    <div id="permBanner"></div>
+
     <div class="card">
       <div class="card-title">현재 감시 조건</div>
       <div class="chips">${chipsHtml || '<span class="muted">설정 없음</span>'}</div>
@@ -206,26 +209,21 @@ app.get('/', (req, res) => {
       });
 
       // ---- 브라우저 알림: 클릭 시 상세페이지 새 탭 열기 ----
+      // 권한이 granted 일 때만 발송한다. 자동으로 requestPermission 을 호출하지 않는다
+      // (사용자 제스처 없는 요청은 크롬이 무시하므로 권한 버튼에서만 요청).
       function showBrowserNotification(opts) {
         if (!('Notification' in window)) return false;
-        var fire = function () {
-          try {
-            var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
-            n.onclick = function (e) {
-              e.preventDefault();
-              if (opts.link) window.open(opts.link, '_blank', 'noopener');
-              window.focus();
-              n.close();
-            };
-            return true;
-          } catch (_) { return false; }
-        };
-        if (Notification.permission === 'granted') return fire();
-        if (Notification.permission !== 'denied') {
-          Notification.requestPermission().then(function (p) { if (p === 'granted') fire(); });
-          return true; // 권한 요청을 띄웠으므로 채널은 활성으로 간주
-        }
-        return false; // 사용자가 차단함
+        if (Notification.permission !== 'granted') return false;
+        try {
+          var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
+          n.onclick = function (e) {
+            e.preventDefault();
+            if (opts.link) window.open(opts.link, '_blank', 'noopener');
+            window.focus();
+            n.close();
+          };
+          return true;
+        } catch (_) { return false; }
       }
 
       // ---- 토스트 ----
@@ -242,6 +240,50 @@ app.get('/', (req, res) => {
         clearTimeout(t._timer);
         t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
       }
+
+      // ---- 브라우저 알림 권한 배너 ----
+      // permission 상태(granted/default/denied)에 따라 배너를 그린다.
+      // requestPermission 은 "브라우저 알림 켜기" 버튼 클릭(사용자 제스처)에서만 호출.
+      function renderPermBanner() {
+        var el = document.getElementById('permBanner');
+        if (!el) return;
+        if (!('Notification' in window)) {
+          el.innerHTML = '<div class="permbanner perm-denied"><span class="permtext">이 브라우저는 알림을 지원하지 않습니다.</span></div>';
+          return;
+        }
+        var perm = Notification.permission;
+        if (perm === 'granted') {
+          el.innerHTML = '<span class="permchip">🔔 브라우저 알림 켜짐</span>';
+          return;
+        }
+        if (perm === 'denied') {
+          el.innerHTML = '<div class="permbanner perm-denied">' +
+            '<span class="permtext">🔕 알림이 차단됨 — 주소창 자물쇠 → 알림 → 허용으로 변경 후 새로고침</span>' +
+            '</div>';
+          return;
+        }
+        // default
+        el.innerHTML = '<div class="permbanner perm-default">' +
+          '<span class="permtext">🔔 브라우저 알림이 꺼져 있어요</span>' +
+          '<button id="permBtn" class="btn btn-amber">브라우저 알림 켜기</button>' +
+          '</div>';
+        var pb = document.getElementById('permBtn');
+        if (pb) {
+          pb.addEventListener('click', function () {
+            // 사용자 제스처 안에서만 권한 요청 → 크롬이 프롬프트를 띄운다
+            Notification.requestPermission().then(function (p) {
+              renderPermBanner();
+              if (p === 'granted') {
+                showBrowserNotification({ title: '🌱 새싹 레이더', body: '새싹 레이더 알림이 켜졌습니다' });
+                toast('브라우저 알림이 켜졌습니다');
+              } else if (p === 'denied') {
+                toast('알림이 차단되었습니다 — 주소창 자물쇠에서 변경할 수 있어요');
+              }
+            });
+          });
+        }
+      }
+      renderPermBanner();
 
       // ---- 알림 리허설 버튼 ----
       var testBtn = document.getElementById('testBtn');
@@ -497,6 +539,16 @@ function pageShell(title, body) {
   .badge-start { background:#fdeaea; color:#d9534f; }
   .badge-new { background:#fff6e6; color:#c98a00; }
   .badge-test { background:#f0e9fb; color:#7c3aed; }
+  .permchip { display:inline-flex; align-items:center; gap:6px; background:#eaf6ef; color:var(--green-d);
+    border:1px solid #cfe9d8; padding:7px 13px; border-radius:999px; font-size:13px; font-weight:700;
+    margin-bottom:14px; }
+  .permbanner { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    padding:12px 16px; border-radius:12px; margin-bottom:14px; font-size:14px; font-weight:600; }
+  .permtext { flex:1; min-width:200px; }
+  .perm-default { background:#fff8e6; border:1px solid #f4e3b0; color:#8a6d1a; }
+  .perm-denied { background:#fdeaea; border:1px solid #f3caca; color:#a33; }
+  .btn-amber { background:#f0ad2e; color:#3a2c05; }
+  .btn-amber:hover { background:#e09c1c; }
   .toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(20px);
     background:#1c2a22; color:#fff; padding:12px 18px; border-radius:12px; font-size:14px; font-weight:600;
     box-shadow:0 8px 24px rgba(0,0,0,.18); opacity:0; pointer-events:none; transition:.25s; z-index:50;
