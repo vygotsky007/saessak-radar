@@ -629,6 +629,96 @@ app.post('/api/test-alert', requireAuth, async (req, res) => {
   }
 });
 
+// ---- 읽기 전용 요약 API (공개, 캐시된 데이터만 — 스크래핑 유발 안 함) ----
+app.get('/api/summary', (req, res) => {
+  try {
+    const s = storage.getSettings();
+    const state = storage.getState();
+    const details = storage.getDetails();
+    const nowMs = Date.now();
+
+    // 이번 사이클에 관측된 프로그램만 (renderPlanner 와 동일 기준)
+    const ids = Object.keys(state);
+    let maxSeen = '';
+    for (const id of ids) if ((state[id].lastSeen || '') > maxSeen) maxSeen = state[id].lastSeen;
+    const cur = ids
+      .filter((id) => maxSeen && (state[id].lastSeen || '') === maxSeen)
+      .map((id) => ({ id, ...state[id], detail: details[id] || null }));
+
+    const tagsOf = (x) => (x.tags || []).map((t) => '#' + t);
+
+    // 신청 오픈 예정 — 신청시작 오름차순(미확인은 뒤)
+    const upcoming = cur
+      .filter((x) => x.status === '모집 예정')
+      .map((x) => {
+        const applyStartAt = (x.detail && x.detail.applyStartAt) || null;
+        return {
+          institution: x.institution || '',
+          title: x.title || '',
+          applyStartAt,
+          dday: applyStartAt ? ddayKst(applyStartAt, nowMs) : null,
+          chapters: (x.detail && x.detail.totalChapters != null) ? x.detail.totalChapters : null,
+          tags: tagsOf(x),
+          link: x.link || '',
+        };
+      })
+      .sort((a, b) => {
+        const av = a.applyStartAt ? Date.parse(a.applyStartAt) : null;
+        const bv = b.applyStartAt ? Date.parse(b.applyStartAt) : null;
+        if (av != null && bv != null) return av - bv;
+        if (av != null) return -1;
+        if (bv != null) return 1;
+        return 0;
+      });
+
+    // 지금 신청 가능 — 잔여(정원-승인) 많은 순
+    const open = cur
+      .filter((x) => x.status === '모집 중')
+      .map((x) => {
+        const capacity = x.capacityClasses || 0;
+        const approved = x.approvedClasses || 0;
+        return {
+          institution: x.institution || '',
+          title: x.title || '',
+          remaining: capacity - approved,
+          capacity,
+          approved,
+          applyEndAt: (x.detail && x.detail.applyEndAt) || null,
+          tags: tagsOf(x),
+          link: x.link || '',
+        };
+      })
+      .sort((a, b) => b.remaining - a.remaining);
+
+    // 최근 이벤트 10건 (test 제외)
+    const recentEvents = storage
+      .getLog()
+      .filter((l) => l.kind !== 'test')
+      .slice(0, 10)
+      .map((l) => ({
+        kind: l.kind,
+        institution: l.institution || '',
+        title: l.title || '',
+        at: l.at || '',
+        link: l.link || '',
+      }));
+
+    res.json({
+      status: {
+        ok: runtime.lastCheckOk === true,
+        lastCheckedAt: runtime.lastCheckAt || null,
+        intervalMinutes: currentInterval || s.intervalMinutes,
+        matchedCount: runtime.lastMatchCount,
+      },
+      upcoming,
+      open,
+      recentEvents,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => res.send('ok'));
 
 // ---- helpers ----
