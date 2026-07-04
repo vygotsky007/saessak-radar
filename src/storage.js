@@ -7,6 +7,9 @@ const DATA_DIR = process.env.DATA_DIR || './data';
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 const LOG_PATH = path.join(DATA_DIR, 'log.json');
+const DETAILS_PATH = path.join(DATA_DIR, 'details.json'); // 프로그램 상세 캐시
+const META_PATH = path.join(DATA_DIR, 'meta.json'); // 마지막 전체 갱신일 등
+const REMINDERS_PATH = path.join(DATA_DIR, 'reminders.json'); // 오픈 리마인더 발송 이력
 
 const DEFAULT_SETTINGS = {
   programType: ['방문형'],
@@ -15,6 +18,10 @@ const DEFAULT_SETTINGS = {
   statuses: ['모집 예정', '모집 중'],
   targets: ['일반형', '사회적 배려형(다문화)'],
   intervalMinutes: 10,
+  // 알림 유형 토글
+  notifyStart: true, // 모집 시작 전환 알림
+  notifyNew: false, // 신규 모집예정 등록 알림 (플래너 반영은 항상)
+  notifyReminder: true, // 오픈 리마인더
 };
 
 function ensureDir() {
@@ -61,6 +68,9 @@ function saveSettings(partial) {
   for (const key of ['programType', 'regions', 'schoolLevels', 'statuses', 'targets']) {
     if (!Array.isArray(next[key])) next[key] = [];
   }
+  for (const key of ['notifyStart', 'notifyNew', 'notifyReminder']) {
+    next[key] = !!next[key];
+  }
   writeJson(SETTINGS_PATH, next);
   return next;
 }
@@ -87,6 +97,31 @@ function appendLog(entry) {
   return trimmed;
 }
 
+// ---- 상세 캐시 (details.json) ----
+function getDetails() {
+  return readJson(DETAILS_PATH, {});
+}
+function saveDetails(map) {
+  writeJson(DETAILS_PATH, map);
+}
+
+// ---- 메타 (meta.json: 마지막 전체 갱신일 등) ----
+function getMeta() {
+  return readJson(META_PATH, {});
+}
+function saveMeta(meta) {
+  writeJson(META_PATH, meta);
+}
+
+// ---- 오픈 리마인더 발송 이력 (reminders.json) ----
+// 키: `${id}:${kind}` (kind: 'pre_day' | 'pre_10min') → { at, applyStartAt }
+function getReminders() {
+  return readJson(REMINDERS_PATH, {});
+}
+function saveReminders(map) {
+  writeJson(REMINDERS_PATH, map);
+}
+
 module.exports = {
   DATA_DIR,
   DEFAULT_SETTINGS,
@@ -96,4 +131,10 @@ module.exports = {
   saveState,
   getLog,
   appendLog,
+  getDetails,
+  saveDetails,
+  getMeta,
+  saveMeta,
+  getReminders,
+  saveReminders,
 };

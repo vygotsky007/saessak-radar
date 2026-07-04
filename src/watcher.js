@@ -1,10 +1,65 @@
 'use strict';
 
 const storage = require('./storage');
-const { scrape } = require('./scraper');
+const { scrape, fetchDetails } = require('./scraper');
+
+const ORIGIN = 'https://newsac.kosac.re.kr';
 
 let consecutiveFailures = 0;
 let failAlertSent = false;
+
+// ---- KST 날짜/시각 헬퍼 ----
+function kstYmd(ms) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(ms));
+}
+function kstHour(ms) {
+  const p = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    hour12: false,
+  })
+    .formatToParts(new Date(ms))
+    .find((x) => x.type === 'hour');
+  return p ? parseInt(p.value, 10) % 24 : 0;
+}
+// KST "7/1(화) 00:00" 표기
+function fmtKstDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    month: 'numeric',
+    day: 'numeric',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const g = (t) => (parts.find((x) => x.type === t) || {}).value || '';
+  return `${g('month')}/${g('day')}(${g('weekday')}) ${g('hour')}:${g('minute')}`;
+}
+// D-day (0=D-DAY, 양수=D-n, 음수=지남) — KST 날짜 기준
+function ddayKst(iso, nowMs) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const da = Date.parse(kstYmd(t) + 'T00:00:00+09:00');
+  const db = Date.parse(kstYmd(nowMs) + 'T00:00:00+09:00');
+  return Math.round((da - db) / 86400000);
+}
+// 신청 시작일 "전날 21:00"(KST) 의 ms
+function prevDay21Kst(iso) {
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const prevMs = Date.parse(kstYmd(t) + 'T00:00:00+09:00') - 86400000;
+  return Date.parse(kstYmd(prevMs) + 'T21:00:00+09:00');
+}
 
 // 런타임 상태 (대시보드 노출용)
 const runtime = {
@@ -181,31 +236,117 @@ async function checkOnce({ reason } = {}) {
     // 같은 id+상태로는 중복 알림 없음 (아래 스냅샷 갱신으로 보장)
   }
 
-  // 알림 발송 + 로그 기록
+  // 알림 발송 + 로그 기록 (유형별 토글 반영: 로그·플래너는 항상, 텔레그램만 게이트)
+  let notified = 0;
   for (const n of notifications) {
-    const html = buildMessage(n.kind, n.card);
-    const sent = await sendTelegram(html, { link: n.card.link });
-    const logEntry = {
+    const wantSend =
+      n.kind === 'start' ? settings.notifyStart : settings.notifyNew;
+    let sent = false;
+    if (wantSend) {
+      const html = buildMessage(n.kind, n.card);
+      sent = await sendTelegram(html, { link: n.card.link });
+      if (sent) notified += 1;
+    }
+    storage.appendLog({
       at: now,
       kind: n.kind, // 'start' | 'new'
       title: n.card.title,
       status: n.card.status,
       link: n.card.link,
       sent,
-    };
-    storage.appendLog(logEntry);
+    });
     console.log(
-      `[watcher] 알림(${n.kind}): ${n.card.title} [${n.card.status}] sent=${sent}`
+      `[watcher] 감지(${n.kind}): ${n.card.title} [${n.card.status}] send=${wantSend} sent=${sent}`
     );
   }
 
-  // 스냅샷 갱신: 조건 통과한 카드만 상태 추적 (전환 감지용)
+  // ---- 상세 수집 (조건 통과분만, 캐시 기반으로 요청 최소화) ----
+  const details = storage.getDetails();
+  const meta = storage.getMeta();
+  const nowMs = Date.now();
+  const todayKst = kstYmd(nowMs);
+  // 하루 1회 새벽(04시 이후) 전체 갱신
+  const dailyDue = meta.lastFullRefreshDate !== todayKst && kstHour(nowMs) >= 4;
+
+  const detailIds = [];
+  for (const card of matched) {
+    if (!card.programId) continue;
+    const prev = state[card.id];
+    const need =
+      !details[card.id] || // 신규
+      (prev && prev.status !== card.status) || // 상태 변경
+      dailyDue; // 하루 1회 전체
+    if (need) detailIds.push(card.programId);
+  }
+
+  let refreshed = 0;
+  let changeCount = 0;
+  if (detailIds.length) {
+    console.log(`[watcher] 상세 갱신 대상 ${detailIds.length}건 (dailyDue=${dailyDue})`);
+    const fetched = await fetchDetails(detailIds);
+    for (const id of Object.keys(fetched)) {
+      const newD = fetched[id];
+      const oldD = details[id];
+      if (oldD) {
+        const changes = diffDetail(oldD, newD);
+        if (changes.length) {
+          changeCount += 1;
+          const title = (state[id] && state[id].title) || newD.id;
+          const link = (state[id] && state[id].link) || '';
+          const desc = changes
+            .map((c) => `${c.field} ${c.from || '-'}→${c.to || '-'}`)
+            .join(', ');
+          storage.appendLog({
+            at: now,
+            kind: 'change',
+            title,
+            status: newD.status,
+            link,
+            sent: false,
+            changes: desc,
+          });
+          console.log(`[watcher] 정보 변경: ${title} — ${desc}`);
+          // 신청 시작 일시 변경 → 텔레그램 알림 + 리마인더 재예약
+          if ((oldD.applyStartAt || '') !== (newD.applyStartAt || '')) {
+            const html =
+              `📅 <b>[신청일정 변경]</b>\n` +
+              `<b>${escapeHtml(title)}</b>\n` +
+              `신청 시작: ${escapeHtml(fmtKstDateTime(oldD.applyStartAt) || '미공지')} → ` +
+              `<b>${escapeHtml(fmtKstDateTime(newD.applyStartAt) || '미공지')}</b>\n` +
+              `${escapeHtml(link)}`;
+            await sendTelegram(html, { link });
+            const rem = storage.getReminders();
+            delete rem[id + ':pre_day'];
+            delete rem[id + ':pre_10min'];
+            storage.saveReminders(rem);
+          }
+        }
+      }
+      details[id] = newD;
+      refreshed += 1;
+    }
+    storage.saveDetails(details);
+  }
+  if (dailyDue) {
+    meta.lastFullRefreshDate = todayKst;
+    storage.saveMeta(meta);
+  }
+
+  // 스냅샷 갱신: 조건 통과한 카드만 상태 추적 (전환 감지 + 플래너용 필드 포함)
   const nextState = { ...state };
   for (const card of matched) {
     const prev = nextState[card.id];
     nextState[card.id] = {
       title: card.title,
       status: card.status,
+      link: card.link,
+      type: card.type,
+      tags: card.tags,
+      levels: card.levels,
+      regions: card.regions,
+      capacityClasses: card.capacityClasses, // 정원(모집 학급)
+      approvedClasses: card.approvedClasses, // 승인
+      pendingClasses: card.pendingClasses, // 대기
       firstSeen: prev ? prev.firstSeen : now,
       lastSeen: now,
     };
@@ -216,8 +357,26 @@ async function checkOnce({ reason } = {}) {
     ok: true,
     total: cards.length,
     matched: matched.length,
-    notified: notifications.length,
+    notified,
+    refreshed,
+    changed: changeCount,
   };
+}
+
+// 상세 필드 diff: 신청기간·정원·차시·신청대상 변경만 추적
+function diffDetail(oldD, newD) {
+  const changes = [];
+  const cmp = (field, a, b) => {
+    if (String(a == null ? '' : a) !== String(b == null ? '' : b)) {
+      changes.push({ field, from: a, to: b });
+    }
+  };
+  cmp('신청시작', fmtKstDateTime(oldD.applyStartAt), fmtKstDateTime(newD.applyStartAt));
+  cmp('신청종료', fmtKstDateTime(oldD.applyEndAt), fmtKstDateTime(newD.applyEndAt));
+  cmp('정원', oldD.capacityClasses, newD.capacityClasses);
+  cmp('차시', oldD.totalChapters, newD.totalChapters);
+  cmp('신청대상', (oldD.targetNames || []).join(','), (newD.targetNames || []).join(','));
+  return changes;
 }
 
 // ---- 알림 리허설 (테스트 알림) ----
@@ -255,11 +414,85 @@ async function sendTestAlert() {
   return { ok: true, telegram, card };
 }
 
+// ---- 오픈 리마인더 (사이트 요청 없음, 1분 간격 경량 체크) ----
+// 신청 시작 일시가 확인된 '모집 예정' 프로그램에 대해 텔레그램 리마인더 2회:
+//  ① 전날 21:00  ② 시작 10분 전. 발송 이력(reminders.json)으로 중복 방지.
+async function checkReminders() {
+  const settings = storage.getSettings();
+  if (!settings.notifyReminder) return { ok: true, sent: 0, off: true };
+
+  const details = storage.getDetails();
+  const state = storage.getState();
+  const reminders = storage.getReminders();
+  const nowMs = Date.now();
+  let sent = 0;
+  let changed = false;
+
+  for (const id of Object.keys(details)) {
+    const d = details[id];
+    const st = state[id];
+    const status = (st && st.status) || d.status;
+    if (status !== '모집 예정') continue;
+    if (!d.applyStartAt) continue;
+
+    const startMs = new Date(d.applyStartAt).getTime();
+    if (isNaN(startMs) || startMs <= nowMs) continue; // 이미 지난 건 제외
+
+    const t10 = startMs - 10 * 60000;
+    // ② 시작 10분 전
+    if (nowMs >= t10 && nowMs < startMs && !reminders[id + ':pre_10min']) {
+      const ok = await sendReminder('pre_10min', id, d, st);
+      reminders[id + ':pre_10min'] = { at: new Date(nowMs).toISOString(), applyStartAt: d.applyStartAt, sent: ok };
+      sent += 1;
+      changed = true;
+    }
+    // ① 전날 21:00 (10분 전 창에 들어오기 전까지만)
+    const preDayMs = prevDay21Kst(d.applyStartAt);
+    if (preDayMs != null && nowMs >= preDayMs && nowMs < t10 && !reminders[id + ':pre_day']) {
+      const ok = await sendReminder('pre_day', id, d, st);
+      reminders[id + ':pre_day'] = { at: new Date(nowMs).toISOString(), applyStartAt: d.applyStartAt, sent: ok };
+      sent += 1;
+      changed = true;
+    }
+  }
+
+  if (changed) storage.saveReminders(reminders);
+  return { ok: true, sent };
+}
+
+async function sendReminder(kind, id, d, st) {
+  const title = (st && st.title) || d.id;
+  const link =
+    (st && st.link) ||
+    (d.programId ? `${ORIGIN}/public/program/thumb/${d.programId}` : ORIGIN);
+  const when = fmtKstDateTime(d.applyStartAt);
+  const head = kind === 'pre_10min' ? '⏰ <b>[10분 뒤 오픈!]</b>' : '🔔 <b>[내일 오픈 예정]</b>';
+  const line =
+    kind === 'pre_10min'
+      ? `10분 뒤 <b>${escapeHtml(when)}</b> 신청이 열립니다.`
+      : `내일 <b>${escapeHtml(when)}</b> 신청이 열립니다.`;
+  const html = `${head}\n<b>${escapeHtml(title)}</b>\n${line}\n${escapeHtml(link)}`;
+  const ok = await sendTelegram(html, { link });
+  storage.appendLog({
+    at: new Date().toISOString(),
+    kind: 'reminder',
+    title: `${kind === 'pre_10min' ? '[10분전]' : '[전날]'} ${title}`,
+    status: '모집 예정',
+    link,
+    sent: ok,
+  });
+  console.log(`[watcher] 리마인더(${kind}): ${title} sent=${ok}`);
+  return ok;
+}
+
 module.exports = {
   checkOnce,
+  checkReminders,
   matchesSettings,
   runtime,
   sendTelegram,
+  fmtKstDateTime,
+  ddayKst,
   sendTestAlert,
   isTelegramConfigured,
 };

@@ -35,7 +35,14 @@ const path = require('path');
 })();
 
 const storage = require('./storage');
-const { checkOnce, runtime, sendTestAlert } = require('./watcher');
+const {
+  checkOnce,
+  checkReminders,
+  runtime,
+  sendTestAlert,
+  fmtKstDateTime,
+  ddayKst,
+} = require('./watcher');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -135,6 +142,8 @@ app.get('/', (req, res) => {
       <div class="logo">🌱 새싹 레이더</div>
       <a class="navlink" href="/settings">⚙️ 감시 조건 설정</a>
     </div>
+
+    ${renderPlanner()}
 
     <div class="grid">
       <div class="card stat">
@@ -391,6 +400,27 @@ app.get('/settings', (req, res) => {
       </div>
 
       <div class="card">
+        <div class="card-title">알림 유형</div>
+        <div class="opts">
+          <label class="opt ${s.notifyStart ? 'on' : ''}">
+            <input type="checkbox" id="notifyStart" ${s.notifyStart ? 'checked' : ''}>
+            <span>모집 시작 전환 알림</span>
+          </label>
+          <label class="opt ${s.notifyNew ? 'on' : ''}">
+            <input type="checkbox" id="notifyNew" ${s.notifyNew ? 'checked' : ''}>
+            <span>신규 모집예정 등록 알림</span>
+          </label>
+          <label class="opt ${s.notifyReminder ? 'on' : ''}">
+            <input type="checkbox" id="notifyReminder" ${s.notifyReminder ? 'checked' : ''}>
+            <span>오픈 리마인더</span>
+          </label>
+        </div>
+        <div class="muted small" style="margin-top:8px;">
+          '신규 모집예정 등록 알림'을 꺼도 신청 플래너에는 항상 표시됩니다.
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title">확인 간격</div>
         <div class="interval">
           <input type="number" id="intervalMinutes" name="intervalMinutes" min="1" max="1440" value="${s.intervalMinutes}">
@@ -421,6 +451,9 @@ app.get('/settings', (req, res) => {
           payload[g] = Array.from(form.querySelectorAll('input[name="'+g+'"]:checked')).map(i => i.value);
         }
         payload.intervalMinutes = parseInt(form.querySelector('#intervalMinutes').value, 10) || 10;
+        payload.notifyStart = form.querySelector('#notifyStart').checked;
+        payload.notifyNew = form.querySelector('#notifyNew').checked;
+        payload.notifyReminder = form.querySelector('#notifyReminder').checked;
         msg.textContent = '저장 중…';
         try {
           const r = await fetch('/api/settings', {
@@ -491,6 +524,129 @@ function fmtTime(iso) {
   }
 }
 
+// ---- 신청 플래너 (대시보드 최상단 카드) ----
+function renderPlanner() {
+  const state = storage.getState();
+  const details = storage.getDetails();
+  const ids = Object.keys(state);
+  const nowMs = Date.now();
+
+  // 이번 사이클에 관측된 프로그램만 (가장 최근 lastSeen 기준)
+  let maxSeen = '';
+  for (const id of ids) if ((state[id].lastSeen || '') > maxSeen) maxSeen = state[id].lastSeen;
+  const cur = ids
+    .filter((id) => maxSeen && (state[id].lastSeen || '') === maxSeen)
+    .map((id) => ({ id, ...state[id], detail: details[id] || null }));
+
+  const open = cur.filter((x) => x.status === '모집 예정');
+  const live = cur.filter((x) => x.status === '모집 중');
+
+  // 그룹 A: 신청 시작 오름차순, 일시 미확인은 맨 아래
+  open.sort((a, b) => {
+    const as = a.detail && a.detail.applyStartAt ? Date.parse(a.detail.applyStartAt) : null;
+    const bs = b.detail && b.detail.applyStartAt ? Date.parse(b.detail.applyStartAt) : null;
+    if (as != null && bs != null) return as - bs;
+    if (as != null) return -1;
+    if (bs != null) return 1;
+    return 0;
+  });
+
+  // 그룹 B: 잔여(정원-승인) 많은 순
+  const remain = (x) => (x.capacityClasses || 0) - (x.approvedClasses || 0);
+  live.sort((a, b) => remain(b) - remain(a));
+
+  const openRows = open
+    .map((x) => {
+      const start = x.detail && x.detail.applyStartAt;
+      const when = start ? fmtKstDateTime(start) : '';
+      const dd = start ? ddayKst(start, nowMs) : null;
+      const ddChip =
+        dd == null
+          ? ''
+          : dd <= 0
+          ? '<span class="dchip dchip-now">D-DAY</span>'
+          : `<span class="dchip">D-${dd}</span>`;
+      const whenHtml = when
+        ? `<span class="plan-when">${escapeHtml(when)}</span> ${ddChip}`
+        : '<span class="badge badge-unknown">일시 미공지</span>';
+      const chapters =
+        x.detail && x.detail.totalChapters != null ? x.detail.totalChapters + '차시' : '';
+      const targets =
+        x.detail && x.detail.targetNames && x.detail.targetNames.length
+          ? x.detail.targetNames.join('·')
+          : '';
+      const tags = (x.tags || []).map((t) => '#' + t).join(' ');
+      const meta = [chapters, targets, tags].filter(Boolean).join(' · ');
+      return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
+        <div class="plan-main">
+          <div class="plan-title">${escapeHtml(x.title || '')}</div>
+          <div class="plan-open">${whenHtml}</div>
+          ${meta ? `<div class="plan-meta">${escapeHtml(meta)}</div>` : ''}
+        </div>
+        <span class="plan-go">상세 ↗</span>
+      </a>`;
+    })
+    .join('');
+
+  const liveRows = live
+    .map((x) => {
+      const cap = x.capacityClasses || 0;
+      const app = x.approvedClasses || 0;
+      const rem = cap - app;
+      const pct = cap > 0 ? Math.min(100, Math.round((app / cap) * 100)) : 0;
+      const remBadge =
+        rem <= 0
+          ? '<span class="badge badge-full">대기만 가능</span>'
+          : `<span class="badge badge-remain">잔여 ${rem}학급</span>`;
+      const end = x.detail && x.detail.applyEndAt ? fmtKstDateTime(x.detail.applyEndAt) : '';
+      const tags = (x.tags || []).map((t) => '#' + t).join(' ');
+      return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
+        <div class="plan-main">
+          <div class="plan-title">${escapeHtml(x.title || '')} ${remBadge}</div>
+          <div class="gauge"><div class="gauge-fill ${rem <= 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>
+          <div class="plan-meta">승인 ${app}/${cap}학급${end ? ' · 마감 ' + escapeHtml(end) : ''}${
+        tags ? ' · ' + escapeHtml(tags) : ''
+      }</div>
+        </div>
+        <span class="plan-go">상세 ↗</span>
+      </a>`;
+    })
+    .join('');
+
+  const changeLogs = storage.getLog().filter((l) => l.kind === 'change').slice(0, 5);
+  const changeRows = changeLogs
+    .map(
+      (l) => `<div class="planrow planrow-static">
+        <div class="plan-main">
+          <div class="plan-title"><span class="badge badge-change">정보 변경</span> ${escapeHtml(l.title || '')}</div>
+          <div class="plan-meta">${escapeHtml(l.changes || '')}</div>
+        </div>
+      </div>`
+    )
+    .join('');
+
+  return `
+    <div class="card planner">
+      <div class="card-title">🗂️ 신청 플래너</div>
+      <div class="plan-group">
+        <div class="plan-group-title">🕐 신청 오픈 예정 <span class="muted small">${open.length}</span></div>
+        ${openRows || '<div class="muted small">예정된 프로그램이 없습니다.</div>'}
+      </div>
+      <div class="plan-group">
+        <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">${live.length}</span></div>
+        ${liveRows || '<div class="muted small">신청 가능한 프로그램이 없습니다.</div>'}
+      </div>
+      ${
+        changeRows
+          ? `<div class="plan-group">
+        <div class="plan-group-title">🔄 정보 변경 <span class="muted small">${changeLogs.length}</span></div>
+        ${changeRows}
+      </div>`
+          : ''
+      }
+    </div>`;
+}
+
 function pageShell(title, body) {
   return `<!doctype html>
 <html lang="ko">
@@ -539,6 +695,31 @@ function pageShell(title, body) {
   .badge-start { background:#fdeaea; color:#d9534f; }
   .badge-new { background:#fff6e6; color:#c98a00; }
   .badge-test { background:#f0e9fb; color:#7c3aed; }
+  .planner { border-color:#d7ebdf; }
+  .plan-group { margin-top:6px; }
+  .plan-group + .plan-group { margin-top:16px; border-top:1px dashed var(--line); padding-top:12px; }
+  .plan-group-title { font-size:13px; font-weight:800; color:#3a4a41; margin-bottom:8px; }
+  .planrow { display:flex; align-items:center; gap:12px; padding:11px 12px; margin:0 -12px;
+    border-radius:11px; text-decoration:none; color:inherit; transition:background .12s; }
+  .planrow:hover { background:#eef7f1; }
+  .planrow-static, .planrow-static:hover { background:transparent; cursor:default; }
+  .plan-main { flex:1; min-width:0; }
+  .plan-title { font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .plan-open { margin-top:3px; display:flex; align-items:center; gap:8px; }
+  .plan-when { font-size:16px; font-weight:800; letter-spacing:-0.01em; color:var(--ink); }
+  .plan-meta { margin-top:3px; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .plan-go { color:var(--green-d); font-size:12px; font-weight:700; white-space:nowrap; opacity:.35; transition:opacity .12s; }
+  .planrow:hover .plan-go { opacity:1; }
+  .dchip { background:#eaf1ff; color:#2a52be; border:1px solid #d3e0fb; padding:2px 9px; border-radius:999px;
+    font-size:12px; font-weight:800; white-space:nowrap; }
+  .dchip-now { background:#ffecec; color:#d9534f; border-color:#f6cccc; }
+  .gauge { margin-top:6px; height:8px; background:#eef2ef; border-radius:999px; overflow:hidden; max-width:280px; }
+  .gauge-fill { height:100%; background:var(--green); border-radius:999px; }
+  .gauge-fill.gauge-full { background:#d9534f; }
+  .badge-change { background:#f0e9fb; color:#7c3aed; }
+  .badge-unknown { background:#eef0f2; color:#7a848c; }
+  .badge-remain { background:#eaf6ef; color:var(--green-d); }
+  .badge-full { background:#fdeaea; color:#d9534f; }
   .permchip { display:inline-flex; align-items:center; gap:6px; background:#eaf6ef; color:var(--green-d);
     border:1px solid #cfe9d8; padding:7px 13px; border-radius:999px; font-size:13px; font-weight:700;
     margin-bottom:14px; }
@@ -588,6 +769,12 @@ app.listen(PORT, () => {
   console.log(`[server] 새싹 레이더 실행 중 → http://localhost:${PORT}`);
   const s = storage.getSettings();
   scheduleCron(s.intervalMinutes);
+
+  // 오픈 리마인더: 1분 간격 경량 체크 (사이트 요청 없음, 스케줄 도달 여부만 판정)
+  setInterval(() => {
+    checkReminders().catch((e) => console.error('[reminder] 예외:', e.message));
+  }, 60000);
+  console.log('[server] 오픈 리마인더 스케줄 등록 (1분 간격)');
 
   // 서버 시작 30초 후 첫 수집
   setTimeout(() => {
