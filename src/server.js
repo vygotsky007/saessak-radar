@@ -222,7 +222,7 @@ app.get('/', (req, res) => {
     runtime.lastCheckOk === null ? '대기 중' : runtime.lastCheckOk ? '감시 정상' : '수집 실패';
   const dotClass =
     runtime.lastCheckOk === false ? 'dot-bad' : runtime.lastCheckOk === null ? 'dot-wait' : 'dot-ok';
-  const condSummary = conditionSummary(s);
+  const condChips = conditionChips(s);
   const planner = renderPlanner();
 
   // 섹션 자동 우선순위: 오픈일시 확인된 예정 프로그램이 1개 이상이면 플래너를 위로
@@ -254,7 +254,8 @@ app.get('/', (req, res) => {
       <span class="sb-sep">·</span><span id="permInline" class="sb-perm"></span>
     </div>
     <div class="condbar">
-      <span class="cond-text">${condSummary ? escapeHtml(condSummary) : '<span class="muted">조건 없음</span>'}</span>
+      <span class="condlabel">감시 조건</span>
+      ${condChips || '<span class="muted">조건 없음</span>'}
     </div>
 
     ${sections}
@@ -760,22 +761,27 @@ function relativeTime(iso, nowMs) {
 }
 
 // 조건 요약 한 줄: "방문형 · 초등 · 서울·인천권 · 예정+중 · #일반형 #다문화"
-function conditionSummary(s) {
+// 대시보드 조건 요약을 카테고리 색 칩으로 렌더 (설정값에서 동적 생성).
+//  · 프로그램 유형 / 학교급 / 운영권역 → 연초록(cc-green)
+//  · 모집상태 → 연노랑(cc-yellow, 각 상태 개별 칩)
+//  · 교육대상 → 연파랑(cc-blue, # 접두)
+function conditionChips(s) {
   const LV = { 초등학교: '초등', 중학교: '중등', 고등학교: '고등' };
-  const ST = { '모집 예정': '예정', '모집 중': '중' };
   const TG = {
     일반형: '일반형',
     '사회적 배려형(다문화)': '다문화',
     '사회적 배려형(도서벽지)': '도서벽지',
     '사회적 배려형(특수교육)': '특수교육',
   };
-  const parts = [];
-  if (s.programType.length) parts.push(s.programType.join('·'));
-  if (s.schoolLevels.length) parts.push(s.schoolLevels.map((v) => LV[v] || v).join('·'));
-  if (s.regions.length) parts.push(s.regions.join('·'));
-  if (s.statuses.length) parts.push(s.statuses.map((v) => ST[v] || v).join('+'));
-  if (s.targets.length) parts.push(s.targets.map((v) => '#' + (TG[v] || v)).join(' '));
-  return parts.join(' · ');
+  const chips = [];
+  for (const v of s.programType) chips.push({ cls: 'cc-green', text: v });
+  for (const v of s.schoolLevels) chips.push({ cls: 'cc-green', text: LV[v] || v });
+  for (const v of s.regions) chips.push({ cls: 'cc-green', text: v });
+  for (const v of s.statuses) chips.push({ cls: 'cc-yellow', text: v });
+  for (const v of s.targets) chips.push({ cls: 'cc-blue', text: '#' + (TG[v] || v) });
+  return chips
+    .map((c) => `<span class="condchip ${c.cls}">${escapeHtml(c.text)}</span>`)
+    .join('');
 }
 
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
@@ -938,11 +944,13 @@ function pageShell(title, body) {
   .sb-perm { display:inline-flex; align-items:center; }
   .perm-ok { color:var(--green-d); font-weight:700; }
   .perm-bad { color:#d9534f; font-weight:700; cursor:help; }
-  .condbar { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
-    padding:2px 4px 0; margin-bottom:14px; font-size:13px; color:#5a6a60; }
-  .cond-text { font-weight:600; }
-  .cond-link { color:var(--green-d); text-decoration:none; font-weight:700; white-space:nowrap; }
-  .cond-link:hover { text-decoration:underline; }
+  .condbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    padding:2px 4px 0; margin-bottom:14px; }
+  .condlabel { font-size:11px; color:#8a978d; font-weight:600; margin-right:2px; }
+  .condchip { font-size:11.5px; padding:2px 9px; border-radius:999px; font-weight:600; line-height:1.7; white-space:nowrap; }
+  .cc-green { background:#E1F5EE; color:#085041; }
+  .cc-yellow { background:#FAEEDA; color:#633806; }
+  .cc-blue { background:#EEF0FE; color:#3F3FBF; }
   .stat { text-align:left; }
   .stat-label { color:var(--muted); font-size:12px; font-weight:600; }
   .stat-num { font-size:30px; font-weight:800; margin:2px 0 4px; letter-spacing:-0.02em; }
