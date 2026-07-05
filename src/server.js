@@ -255,7 +255,6 @@ app.get('/', (req, res) => {
     </div>
     <div class="condbar">
       <span class="cond-text">${condSummary ? escapeHtml(condSummary) : '<span class="muted">조건 없음</span>'}</span>
-      <a class="cond-link" href="/settings#conditions">조건 변경 ›</a>
     </div>
 
     ${sections}
