@@ -176,9 +176,11 @@ async function getSeason(page) {
  * 카드가 0개면 에러를 던져 잘못된 "전부 사라짐" diff 방지.
  */
 async function scrape() {
+  // launch에 timeout(30초) — 크롬 기동이 멈춰도 그 주기는 예외로 끝나고 다음 주기에 재시도.
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    timeout: 30000,
   });
 
   try {
@@ -216,7 +218,12 @@ async function scrape() {
 
     return cards;
   } finally {
-    await browser.close();
+    // close 자체가 실패해도(이미 죽은 프로세스 등) 다음 주기를 막지 않도록 삼켜서 처리.
+    try {
+      await browser.close();
+    } catch (e) {
+      console.warn('[scraper] scrape browser.close 실패(무시):', e.message);
+    }
   }
 }
 
@@ -230,9 +237,11 @@ async function fetchDetails(programIds) {
   const ids = Array.from(new Set((programIds || []).filter((x) => x != null)));
   if (ids.length === 0) return {};
 
+  // launch에 timeout(30초) — 상세 수집용 크롬 기동이 멈춰도 예외로 끝나 다음 주기에 재시도.
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    timeout: 30000,
   });
   try {
     const context = await browser.newContext({
@@ -274,7 +283,12 @@ async function fetchDetails(programIds) {
     console.log(`[scraper] 상세 수집 ${Object.keys(result).length}/${ids.length}건`);
     return result;
   } finally {
-    await browser.close();
+    // close 실패가 다음 주기를 막지 않도록 삼켜서 처리.
+    try {
+      await browser.close();
+    } catch (e) {
+      console.warn('[scraper] fetchDetails browser.close 실패(무시):', e.message);
+    }
   }
 }
 

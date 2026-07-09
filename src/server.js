@@ -1,7 +1,6 @@
 'use strict';
 
 const express = require('express');
-const cron = require('node-cron');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -137,35 +136,54 @@ function requireAuth(req, res, next) {
   return res.redirect('/auth?next=' + encodeURIComponent(req.originalUrl || '/settings'));
 }
 
-// ---- cron 스케줄 관리 ----
-let currentTask = null;
-let currentInterval = null;
+// ---- 정기 수집 스케줄러 (자기예약 방식 + 단일 실행 락) ----
+// setInterval/cron 처럼 "고정 주기 발화"는 이전 수집이 안 끝났을 때 겹쳐서 chromium 을
+// 다중 launch → spawn EAGAIN 을 유발한다. 그래서 ① isCollecting 락으로 중복 실행을 막고,
+// ② 수집이 "끝난 뒤"에야 다음 주기를 setTimeout 으로 예약해 겹침을 원천 차단한다.
+let currentInterval = null;  // 대시보드/요약 노출용(현재 적용 간격)
+let isCollecting = false;    // 단일 실행 락 — 수집(scrape+fetchDetails) 1건만 진행
+let nextTimer = null;        // 다음 주기 예약 타이머 핸들
 
-function scheduleCron(minutes) {
-  if (currentTask) {
-    currentTask.stop();
-    currentTask = null;
+// 모든 수집 진입점(정기·시작·수동)은 이 함수를 통과한다 → 락이 전역으로 걸린다.
+// 어떤 경로로 끝나든(성공·에러·타임아웃) finally 에서 락을 반드시 해제 → 다음 주기 정상 진행.
+async function runCollectCycle(reason) {
+  if (isCollecting) {
+    console.log(`[scheduler] 이전 수집이 아직 진행 중 — 이번 주기(${reason}) 건너뜀`);
+    return { ok: false, skipped: true, error: '이미 수집이 진행 중입니다.' };
   }
-  const m = Math.max(1, parseInt(minutes, 10) || 10);
+  isCollecting = true;
+  try {
+    console.log(`[scheduler] 정기 수집 시작 (reason=${reason})`);
+    return await checkOnce({ reason });
+  } catch (e) {
+    // launch 타임아웃 등 예외는 이 주기만 실패로 두고 삼킨다(다음 주기에 자동 재시도).
+    console.error(`[scheduler] 수집 예외 (${reason}):`, e.message);
+    return { ok: false, error: e.message };
+  } finally {
+    isCollecting = false;
+  }
+}
+
+// 수집이 끝난 뒤 다음 주기를 예약. 매번 설정에서 간격을 다시 읽어 변경을 자동 반영한다.
+function scheduleNext() {
+  const s = storage.getSettings();
+  const m = Math.max(1, parseInt(s.intervalMinutes, 10) || 10);
   currentInterval = m;
-  // 매 m분마다 실행
-  const expr = m >= 60 ? `0 */${Math.floor(m / 60)} * * *` : `*/${m} * * * *`;
-  currentTask = cron.schedule(expr, () => {
-    console.log(`[cron] 정기 수집 시작 (${m}분 간격)`);
-    checkOnce({ reason: 'cron' }).catch((e) =>
-      console.error('[cron] 예외:', e.message)
-    );
-  });
-  console.log(`[cron] 스케줄 등록: ${expr} (${m}분)`);
+  if (nextTimer) clearTimeout(nextTimer);
+  nextTimer = setTimeout(async () => {
+    await runCollectCycle('cron');   // 락으로 보호 — 실행 중이면 즉시 스킵
+    scheduleNext();                  // 끝난 뒤에야 다음 주기 예약 → 겹침 불가
+  }, m * 60000);
+  console.log(`[scheduler] 다음 정기 수집 예약: ${m}분 후`);
 }
 
 function rescheduleIfChanged() {
   const s = storage.getSettings();
   if (s.intervalMinutes !== currentInterval) {
     console.log(
-      `[cron] 간격 변경 감지 ${currentInterval} → ${s.intervalMinutes}분, 재등록`
+      `[scheduler] 간격 변경 감지 ${currentInterval} → ${s.intervalMinutes}분, 재예약`
     );
-    scheduleCron(s.intervalMinutes);
+    scheduleNext(); // 대기 중 타이머를 새 간격으로 교체(실행 중이면 다음 주기부터 적용)
   }
 }
 
@@ -613,7 +631,8 @@ app.post('/api/settings', requireAuth, (req, res) => {
 
 app.post('/api/check-now', requireAuth, async (req, res) => {
   try {
-    const result = await checkOnce({ reason: 'manual' });
+    // 수동 확인도 동일 락을 통과 → 정기 수집과 겹쳐 chromium 이 중복 launch 되지 않음.
+    const result = await runCollectCycle('manual');
     res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1052,8 +1071,8 @@ function pageShell(title, body) {
 // ---- 시작 ----
 app.listen(PORT, () => {
   console.log(`[server] 새싹 레이더 실행 중 → http://localhost:${PORT}`);
-  const s = storage.getSettings();
-  scheduleCron(s.intervalMinutes);
+  // 정기 수집 스케줄 시작(설정 간격 기준). 이후 매 주기는 '끝난 뒤' 스스로 재예약.
+  scheduleNext();
 
   // 오픈 리마인더: 1분 간격 경량 체크 (사이트 요청 없음, 스케줄 도달 여부만 판정)
   setInterval(() => {
@@ -1061,11 +1080,9 @@ app.listen(PORT, () => {
   }, 60000);
   console.log('[server] 오픈 리마인더 스케줄 등록 (1분 간격)');
 
-  // 서버 시작 30초 후 첫 수집
+  // 서버 시작 30초 후 첫 수집 — 동일 락을 통과(예약 주기와 겹쳐도 하나만 실행).
   setTimeout(() => {
     console.log('[server] 첫 수집 시작 (시작 30초 후)');
-    checkOnce({ reason: 'startup' }).catch((e) =>
-      console.error('[server] 첫 수집 예외:', e.message)
-    );
+    runCollectCycle('startup');
   }, 30000);
 });
