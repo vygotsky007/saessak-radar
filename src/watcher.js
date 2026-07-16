@@ -2,6 +2,7 @@
 
 const storage = require('./storage');
 const { scrape, fetchDetails } = require('./scraper');
+const classify = require('./classify');
 
 const ORIGIN = 'https://newsac.kosac.re.kr';
 
@@ -111,12 +112,21 @@ function matchesSettings(card, settings) {
     if (!hit) return false;
   }
 
-  // 교육대상 태그: OR. 카드 태그에 체크한 대상 중 하나라도 있으면 통과
+  // 교육대상 태그: OR. 표준 key 로 정규화해 비교(구 라벨/축약/공백 흔들림 흡수).
+  // 설정에 '미분류'가 포함돼 있으면 알 수 없는(신설/변경) 라벨 카드도 통과.
   if (settings.targets.length) {
-    const cardTags = (card.tags || []).map((t) => t.replace(/\s+/g, ''));
-    const hit = settings.targets.some((t) =>
-      cardTags.some((ct) => ct.includes(t.replace(/\s+/g, '')))
-    );
+    const wantKeys = new Set();
+    let wantUnknown = false;
+    for (const t of settings.targets) {
+      const k = classify.canonicalKey(t);
+      if (k) wantKeys.add(k);
+      else if (classify.stripWs(t) === classify.stripWs(classify.UNCLASSIFIED))
+        wantUnknown = true;
+    }
+    const hit = (card.tags || []).some((tag) => {
+      const k = classify.canonicalKey(tag);
+      return k ? wantKeys.has(k) : wantUnknown;
+    });
     if (!hit) return false;
   }
 
@@ -178,7 +188,7 @@ function buildMessage(kind, card) {
     card.type,
     (card.regions || []).join(','),
     (card.levels || []).join(','),
-    (card.tags || []).map((t) => '#' + t).join(' '),
+    (card.tags || []).map((t) => '#' + classify.shortOf(t)).join(' '),
   ].filter((x) => x && x.length);
 
   return (
@@ -216,6 +226,49 @@ async function checkOnce({ reason } = {}) {
       failAlertSent = true;
     }
     return { ok: false, error: err.message };
+  }
+
+  // ---- 알 수 없는(신설/변경) 분류 라벨 감지 → 미분류 수집 + 1회 텔레그램 알림 ----
+  // 수집 자체는 이미 전체를 대상으로 하므로 별도 필터 없이 '발견 보고'만 담당한다.
+  try {
+    const metaU = storage.getMeta();
+    const alerted = new Set(metaU.alertedLabels || []);
+    const freshUnknown = [];
+    const seenThisCycle = new Set();
+    for (const c of cards) {
+      for (const tag of c.tags || []) {
+        const t = String(tag || '').trim();
+        if (!t || classify.canonicalKey(t)) continue; // 알려진 분류는 통과
+        if (seenThisCycle.has(t)) continue;
+        seenThisCycle.add(t);
+        if (!alerted.has(t)) freshUnknown.push(t);
+      }
+    }
+    if (freshUnknown.length) {
+      for (const t of freshUnknown) alerted.add(t);
+      metaU.alertedLabels = Array.from(alerted);
+      storage.saveMeta(metaU);
+      const html =
+        '🆕 <b>[새 분류 발견]</b>\n' +
+        freshUnknown.map((t) => '• ' + escapeHtml(t)).join('\n') +
+        '\n\n알 수 없는 교육대상 분류입니다. <b>미분류</b>로 수집 중이니 ' +
+        '레이더 매핑/설정 확인이 필요할 수 있습니다.';
+      await sendTelegram(html);
+      for (const t of freshUnknown) {
+        storage.appendLog({
+          at: new Date().toISOString(),
+          kind: 'new-label',
+          title: '새 분류 발견: ' + t,
+          institution: '',
+          status: '',
+          link: '',
+          sent: true,
+        });
+      }
+      console.log('[watcher] 새 분류 발견:', freshUnknown.join(', '));
+    }
+  } catch (e) {
+    console.error('[watcher] 새 분류 감지 실패:', e.message);
   }
 
   const state = storage.getState();

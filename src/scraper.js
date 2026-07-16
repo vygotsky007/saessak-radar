@@ -1,6 +1,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
+const { canonicalFull } = require('./classify');
 
 const ORIGIN = 'https://newsac.kosac.re.kr';
 // 사람이 보는 목록 페이지 (참고용)
@@ -48,7 +49,8 @@ function buildAt(dateStr, HH, mm) {
 function mapDetail(programId, b) {
   const targetNames = (b.target || [])
     .map((t) => t.codeInfo && t.codeInfo.codeName)
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(canonicalFull); // 구 분류 라벨 → 새 정식 라벨 정규화(비분류 값은 원문 유지)
   const grades = (b.elementarySchool || [])
     .concat(b.middleSchool || [], b.highSchool || [])
     .map((x) => x.codeInfo && x.codeInfo.codeName)
@@ -93,10 +95,13 @@ function mapItem(item) {
   if ((item.highSchoolCnt || 0) > 0) levels.push('고등학교');
 
   // 교육대상 태그: "일반형,사회적 배려형(도서벽지)" → 배열
+  // 개편 대응: 구 라벨은 새 정식 라벨로 정규화. 알 수 없는 신설 라벨은 원문 유지
+  // (수집은 그대로 하되, 매칭/표기 계층에서 '미분류'로 취급하고 별도 알림).
   const tags = String(item.targetName || '')
     .split(',')
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(canonicalFull);
 
   const id = item.programId ? 'p_' + item.programId : null;
   const link = item.programId ? `${DETAIL_BASE}/${item.programId}` : LIST_URL;

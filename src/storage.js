@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS = {
   regions: ['서울·인천권'],
   schoolLevels: ['초등학교'],
   statuses: ['모집 예정', '모집 중'],
-  targets: ['일반형', '사회적 배려형(다문화)'],
+  targets: ['일반형', '사회적 배려형(이주배경(구 다문화))'],
   intervalMinutes: 10,
   // 알림 유형 토글
   notifyStart: true, // 모집 시작 전환 알림

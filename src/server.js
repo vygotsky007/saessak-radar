@@ -35,6 +35,8 @@ const crypto = require('crypto');
 })();
 
 const storage = require('./storage');
+const classify = require('./classify');
+const { migrate } = require('./migrate');
 const {
   checkOnce,
   checkReminders,
@@ -202,7 +204,7 @@ app.get('/', (req, res) => {
   for (const v of s.schoolLevels) chips.push(v);
   for (const v of s.regions) chips.push(v);
   for (const v of s.statuses) chips.push(v);
-  for (const v of s.targets) chips.push('#' + v);
+  for (const v of s.targets) chips.push('#' + classify.shortOf(v));
 
   const chipsHtml = chips
     .map((c) => `<span class="chip">${escapeHtml(c)}</span>`)
@@ -214,6 +216,7 @@ app.get('/', (req, res) => {
     new: '<span class="badge badge-new">신규</span>',
     reminder: '<span class="badge badge-reminder">리마인더</span>',
     change: '<span class="badge badge-change">정보 변경</span>',
+    'new-label': '<span class="badge badge-newlabel">새 분류</span>',
   };
   const logRows = log
     .slice(0, 20)
@@ -427,12 +430,22 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
 
       <div class="card">
-        <div class="card-title">교육대상 <span class="muted small">(OR — 하나라도 있으면 통과)</span></div>
+        <div class="card-title">교육대상 <span class="muted small">(OR — 하나라도 있으면 통과 · 마우스를 올리면 전체 이름)</span></div>
         <div class="opts">
-          ${cb('targets', '일반형', '일반형', has(s.targets, '일반형'))}
-          ${cb('targets', '사회적 배려형(다문화)', '다문화', has(s.targets, '사회적 배려형(다문화)'))}
-          ${cb('targets', '사회적 배려형(도서벽지)', '도서벽지', has(s.targets, '사회적 배려형(도서벽지)'))}
-          ${cb('targets', '사회적 배려형(특수교육)', '특수교육', has(s.targets, '사회적 배려형(특수교육)'))}
+          ${classify.CATEGORIES.map((c) => {
+            const checked = has(s.targets, c.full);
+            return `<label class="opt ${checked ? 'on' : ''}" title="${escapeHtml(c.full)}">
+              <input type="checkbox" name="targets" value="${escapeHtml(c.full)}" ${checked ? 'checked' : ''}>
+              <span>${escapeHtml(c.short)}</span>
+            </label>`;
+          }).join('')}
+          ${(() => {
+            const checked = has(s.targets, classify.UNCLASSIFIED);
+            return `<label class="opt ${checked ? 'on' : ''}" title="알 수 없는 신설/변경 분류(미분류)까지 알림 대상에 포함">
+              <input type="checkbox" name="targets" value="${escapeHtml(classify.UNCLASSIFIED)}" ${checked ? 'checked' : ''}>
+              <span>미분류</span>
+            </label>`;
+          })()}
         </div>
       </div>
 
@@ -786,20 +799,19 @@ function relativeTime(iso, nowMs) {
 //  · 교육대상 → 연파랑(cc-blue, # 접두)
 function conditionChips(s) {
   const LV = { 초등학교: '초등', 중학교: '중등', 고등학교: '고등' };
-  const TG = {
-    일반형: '일반형',
-    '사회적 배려형(다문화)': '다문화',
-    '사회적 배려형(도서벽지)': '도서벽지',
-    '사회적 배려형(특수교육)': '특수교육',
-  };
   const chips = [];
   for (const v of s.programType) chips.push({ cls: 'cc-green', text: v });
   for (const v of s.schoolLevels) chips.push({ cls: 'cc-green', text: LV[v] || v });
   for (const v of s.regions) chips.push({ cls: 'cc-green', text: v });
   for (const v of s.statuses) chips.push({ cls: 'cc-yellow', text: v });
-  for (const v of s.targets) chips.push({ cls: 'cc-blue', text: '#' + (TG[v] || v) });
+  // 교육대상: 축약 표기 + 전체명 툴팁
+  for (const v of s.targets)
+    chips.push({ cls: 'cc-blue', text: '#' + classify.shortOf(v), title: v });
   return chips
-    .map((c) => `<span class="condchip ${c.cls}">${escapeHtml(c.text)}</span>`)
+    .map(
+      (c) =>
+        `<span class="condchip ${c.cls}"${c.title ? ` title="${escapeHtml(c.title)}"` : ''}>${escapeHtml(c.text)}</span>`
+    )
     .join('');
 }
 
@@ -853,9 +865,9 @@ function renderPlanner() {
         x.detail && x.detail.totalChapters != null ? x.detail.totalChapters + '차시' : '';
       const targets =
         x.detail && x.detail.targetNames && x.detail.targetNames.length
-          ? x.detail.targetNames.join('·')
+          ? x.detail.targetNames.map((t) => classify.shortOf(t)).join('·')
           : '';
-      const tags = (x.tags || []).map((t) => '#' + t).join(' ');
+      const tags = (x.tags || []).map((t) => '#' + classify.shortOf(t)).join(' ');
       const meta = [chapters, targets, tags].filter(Boolean).join(' · ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
@@ -879,7 +891,7 @@ function renderPlanner() {
           ? '<span class="badge badge-full">대기만 가능</span>'
           : `<span class="badge badge-remain">잔여 ${rem}학급</span>`;
       const end = x.detail && x.detail.applyEndAt ? fmtKstDateTime(x.detail.applyEndAt) : '';
-      const tags = (x.tags || []).map((t) => '#' + t).join(' ');
+      const tags = (x.tags || []).map((t) => '#' + classify.shortOf(t)).join(' ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
           <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))} ${remBadge}</div>
@@ -996,6 +1008,7 @@ function pageShell(title, body) {
   .badge-start { background:#fdeaea; color:#d9534f; }
   .badge-new { background:#fff6e6; color:#c98a00; }
   .badge-test { background:#f0e9fb; color:#7c3aed; }
+  .badge-newlabel { background:#e6f0ff; color:#1d4ed8; }
   .planner { border-color:#d7ebdf; }
   .plan-group { margin-top:6px; }
   .plan-group + .plan-group { margin-top:16px; border-top:1px dashed var(--line); padding-top:12px; }
@@ -1071,6 +1084,12 @@ function pageShell(title, body) {
 // ---- 시작 ----
 app.listen(PORT, () => {
   console.log(`[server] 새싹 레이더 실행 중 → http://localhost:${PORT}`);
+  // 교육대상 분류 개편 이관(멱등) — 저장된 구 분류 라벨을 새 정식 라벨로 정규화
+  try {
+    migrate();
+  } catch (e) {
+    console.error('[server] 분류 이관 실패(계속 진행):', e.message);
+  }
   // 정기 수집 스케줄 시작(설정 간격 기준). 이후 매 주기는 '끝난 뒤' 스스로 재예약.
   scheduleNext();
 
